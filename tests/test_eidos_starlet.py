@@ -10,7 +10,8 @@ import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from DESIFlow.eidos.starlet import WeightedStarlet, RawStarletPath, SmoothStarletPath
+from DESIFlow.eidos.starlet import WeightedStarlet, RawStarletPath, SmoothStarletPath, normalize_raw
+from DESIFlow.eidos.embeddings import ScaleToken
 from DESIFlow.preprocessing.preprocessing import Preprocessor
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -66,8 +67,8 @@ def reference_hellinger2(a, b, J):
 def test_sqrtP_reproduces_metric_hellinger():
     a, b = spectrum(3), spectrum(3)
     path = SmoothStarletPath(J).to(DEV)
-    sa, _ = path(torch.stack([T(a), torch.ones(3, N, device=DEV)], 1))
-    sb, _ = path(torch.stack([T(b), torch.ones(3, N, device=DEV)], 1))
+    sa, _, _ = path(torch.stack([T(a), torch.ones(3, N, device=DEV)], 1))
+    sb, _, _ = path(torch.stack([T(b), torch.ones(3, N, device=DEV)], 1))
     h2_path = 0.5 * ((sa - sb) ** 2).sum((1, 2)).cpu().numpy()
     h2_ref = reference_hellinger2(a, b, J)
     rel = np.abs(h2_path / h2_ref - 1).max()
@@ -78,12 +79,47 @@ def test_sqrtP_reproduces_metric_hellinger():
 def test_normalization_and_invariances():
     f = spectrum(2); ivar = RNG.uniform(0.5, 5, (2, N)); ivar[:, 5000:6600] = 0
     path = SmoothStarletPath(J).to(DEV)
-    s1, _ = path(torch.stack([T(f), T(ivar)], 1))
-    s2, _ = path(torch.stack([T(7.3 * f), T(ivar * 123.0)], 1))
+    s1, _, sc1 = path(torch.stack([T(f), T(ivar)], 1))
+    s2, _, sc2 = path(torch.stack([T(7.3 * f), T(ivar * 123.0)], 1))
     norm = (s1 ** 2).sum((1, 2)).cpu().numpy()
     d = (s1 - s2).abs().max().item()
-    assert np.allclose(norm, 1, atol=1e-5) and d < 1e-5, (norm, d)
-    return f"sum sqrtP^2 = {norm.round(6).tolist()}; flux x7.3 and ivar x123 change sqrtP by {d:.1e}"
+    ratio = (sc2 / sc1).cpu().numpy()
+    assert np.allclose(norm, 1, atol=1e-5) and d < 1e-5 and np.allclose(ratio, 7.3, rtol=1e-5), (norm, d, ratio)
+    return (f"sum sqrtP^2 = {norm.round(6).tolist()}; flux x7.3 and ivar x123 change sqrtP by {d:.1e}; "
+            f"scale ratio {ratio.round(5).tolist()} (expect 7.3)")
+
+
+def test_normalize_raw_is_magnitude_invariant_and_keeps_snr():
+    f = spectrum(2); ivar = RNG.uniform(0.5, 5, (2, N)); good = np.ones((2, N)); good[:, 5000:6600] = 0
+    sm, raw = SmoothStarletPath(J).to(DEV), RawStarletPath(J).to(DEV)
+    out = []
+    for k in [1.0, 0.013]:                                       # same object, 77x fainter
+        xs = torch.stack([T(k * f * good), T(ivar * good / k ** 2)], 1)
+        xr = torch.stack([T(k * f * good), T(ivar * good / k ** 2), T(good)], 1)
+        _, _, s = sm(xs)
+        xn = normalize_raw(xr, s)
+        out.append((xn, raw(xn), s))
+    (xa, cha, sa), (xb, chb, sb) = out
+    snr = lambda x: x[:, 0] * x[:, 1].sqrt()
+    d_flux = (xa[:, 0] - xb[:, 0]).abs().max().item(); d_ch = (cha - chb).abs().max().item()
+    d_snr = (snr(xa) - snr(torch.stack([T(f * good), T(ivar * good)], 1))).abs().max().item()
+    assert d_flux < 1e-4 and d_ch < 1e-4 and d_snr < 1e-3, (d_flux, d_ch, d_snr)
+    return (f"object at flux x1 and x0.013: normalized raw flux differs by {d_flux:.1e}, raw starlet channels by {d_ch:.1e}; "
+            f"S/N per pixel unchanged by normalization ({d_snr:.1e}); log10 s {torch.log10(sa).cpu().numpy().round(3).tolist()} "
+            f"vs {torch.log10(sb).cpu().numpy().round(3).tolist()}")
+
+
+def test_scale_token():
+    tok = ScaleToken(d_token=256).to(DEV)
+    s = T(10 ** np.linspace(-1, 2, 7))
+    e = tok(s)
+    same = (tok(s) - e).abs().max().item()
+    cos = torch.nn.functional.cosine_similarity(e[:-1, 0], e[1:, 0], dim=-1).detach().cpu().numpy()
+    e.sum().backward()
+    grads = all(p.grad is not None and torch.isfinite(p.grad).all() for p in tok.parameters())
+    assert e.shape == (7, 1, 256) and same == 0 and grads
+    return (f"shape {tuple(e.shape)}; deterministic; gradients flow; cosine similarity of neighbours 0.5 dex apart "
+            f"(untrained) {cos.round(3).tolist()}; {sum(p.numel() for p in tok.parameters())} parameters")
 
 
 def test_gap_handling():
@@ -106,16 +142,21 @@ def test_real_spectra_end_to_end():
     x = torch.stack([T(np.asarray(t[c], np.float32)) for c in ("FLUX", "IVAR", "MASK")], 1)
     pre, raw_p, sm_p = Preprocessor().to(DEV), RawStarletPath(J).to(DEV), SmoothStarletPath(J).to(DEV)
     x_raw, x_smooth = pre(x)
-    ch = raw_p(x_raw); sp, sup = sm_p(x_smooth)
-    good = x_raw[:, 2] > 0
-    err = (ch.sum(1) - x_raw[:, 0])[good].abs().max().item() / x_raw[:, 0][good].abs().max().item()
+    sp, sup, scale = sm_p(x_smooth)
+    xn = normalize_raw(x_raw, scale)
+    ch = raw_p(xn)
+    good = xn[:, 2] > 0
+    err = (ch.sum(1) - xn[:, 0])[good].abs().max().item() / xn[:, 0][good].abs().max().item()
     norm = (sp ** 2).sum((1, 2))
+    med = torch.stack([xn[i, 0][good[i]].abs().median() for i in range(len(xn))])
     assert torch.isfinite(ch).all() and torch.isfinite(sp).all() and err < 1e-5 and (norm - 1).abs().max() < 1e-4
     torch.cuda.synchronize() if DEV.type == "cuda" else None
     xb = x_raw[:64].repeat(4, 1, 1); xs = x_smooth[:64].repeat(4, 1, 1)
     raw_p(xb); sm_p(xs); torch.cuda.synchronize() if DEV.type == "cuda" else None
     t0 = time.time(); raw_p(xb); sm_p(xs); torch.cuda.synchronize() if DEV.type == "cuda" else None
     return (f"100 DESI spectra: finite; raw recon rel err {err:.1e}; sum sqrtP^2 in [{norm.min():.5f}, {norm.max():.5f}]; "
+            f"log10 s in [{torch.log10(scale).min():.2f}, {torch.log10(scale).max():.2f}], median |normalized flux| "
+            f"in [{med.min():.2f}, {med.max():.2f}]; "
             f"both paths B=256, J={J}: {1e3 * (time.time() - t0):.1f} ms; outputs raw {tuple(ch.shape[1:])}, "
             f"sqrtP {tuple(sp.shape[1:])}, support {tuple(sup.shape[1:])}")
 

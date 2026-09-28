@@ -9,20 +9,26 @@ Weights are ivar * good, so bad or noisy pixels are down-weighted and gaps are f
 without inpainting the input. Channels are ordered [detail_1 .. detail_J, coarse] (J+1 channels) and are
 zeroed on not-good pixels (reconstruction is exact on good pixels).
 
-RawStarletPath     x_raw (B, 3, N) = [flux, ivar, good]  ->  channels (B, J+1, N)   (signed, flux units)
-SmoothStarletPath  x_smooth (B, 2, N) = [flux_s, ivar_s]  ->  sqrtP (B, 2(J+1), N), support (B, J+1, N)
+RawStarletPath     x_raw (B, 3, N) = [flux, ivar, good]  ->  channels (B, J+1, N)   (signed; units of the input,
+                   so feed it normalize_raw(x_raw, scale) for magnitude-invariant channels)
+SmoothStarletPath  x_smooth (B, 2, N) = [flux_s, ivar_s]  ->  sqrtP (B, 2(J+1), N), support (B, J+1, N), scale (B,)
     sqrtP: Hellinger coordinates of the L1 composition the metric is defined on,
            P(i, lam, +/-) = max(+/-detail_i(lam), 0) / M,   M = sum_i sum_{good lam} |detail_i(lam)|,
            ordered [s1+, s1-, s2+, s2-, ..., coarse+, coarse-]; sum over good pixels of sqrtP^2 = 1, and
            for two spectra on the same pixels  0.5 * ||sqrtP_a - sqrtP_b||^2 = the compositional Hellinger^2.
     support: good-pixel mask passed through the same kernel cascade; channel i = fraction of the footprint of
              detail_i (the footprint of c_{i+1}) that lies on good pixels, in [0, 1] (coarse uses c_J's footprint).
+    scale:   s = M / N_good, the composition mass per good pixel (flux units). The magnitude normalization for the
+             whole network: raw inputs are divided by it (normalize_raw) and log10(s) is passed separately
+             (eidos.embeddings.ScaleToken), so the spectral content is magnitude-invariant and the scale explicit.
+
+normalize_raw(x_raw, scale) -> [flux / s, ivar * s^2, good]   (S/N per pixel unchanged)
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-_B3 = [1 / 16, 1 / 4, 3 / 8, 1 / 4, 1 / 16]
+_B3 = [1./16., 1./4., 3./8., 1./4., 1./16.]
 
 
 class WeightedStarlet(nn.Module):
@@ -69,8 +75,14 @@ class RawStarletPath(nn.Module):
         return channels * good.unsqueeze(1)
 
 
+def normalize_raw(x_raw: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Magnitude-normalize the raw arrays by the per-spectrum scale s (B,): [flux / s, ivar * s^2, good]."""
+    s = scale.view(-1, 1)
+    return torch.stack([x_raw[:, 0] / s, x_raw[:, 1] * s ** 2, x_raw[:, 2]], dim=1)
+
+
 class SmoothStarletPath(nn.Module):
-    """Weighted starlet of the smoothed spectrum -> Hellinger coordinates of its L1 composition + support.
+    """Weighted starlet of the smoothed spectrum -> Hellinger coordinates of its L1 composition + support + scale.
     x_smooth: (B, 2, N) = [flux_s, ivar_s]; good where ivar_s > 0."""
 
     def __init__(self, n_scales: int = 9):
@@ -85,4 +97,5 @@ class SmoothStarletPath(nn.Module):
         mass = channels.abs().sum(dim=(1, 2), keepdim=True).clamp_min(1e-30)         # M
         pos, neg = channels.clamp_min(0) / mass, (-channels).clamp_min(0) / mass
         sqrt_p = torch.stack([pos, neg], dim=2).flatten(1, 2).sqrt()                 # [s1+, s1-, s2+, s2-, ...]
-        return sqrt_p, support
+        scale = mass.view(-1) / good.sum(-1).clamp_min(1)                            # M per good pixel
+        return sqrt_p, support, scale

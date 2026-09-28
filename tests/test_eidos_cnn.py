@@ -35,24 +35,60 @@ def test_shapes_and_token_wavelengths():
     return f"tokens {tuple(tok.shape)} (downsample x{NET.downsample}, {dv:.0f} km/s per token); scale {tuple(s.shape)}"
 
 
-def test_branch_receptive_fields_match_starlet_footprints():
-    """Convolutional reach only: GroupNorm(1) normalizes with statistics over the whole sequence, which makes every
-    output depend (weakly) on every input, so the norms are bypassed for this measurement."""
+class _NoNorm(torch.nn.Module):
+    def forward(self, x, w):
+        return x
+
+
+def test_branch_receptive_fields_match_feature_widths():
+    """Convolutional reach only: the norm uses statistics over the whole sequence, which makes every output depend
+    (weakly) on every input, so the norms are bypassed for this measurement."""
     import copy
     rows = []
     for i, br0 in enumerate(NET.branches):
         br = copy.deepcopy(br0)
-        br.net = torch.nn.Sequential(*[m for m in br.net if not isinstance(m, torch.nn.GroupNorm)])
+        for layer in br.layers:
+            layer.norm = _NoNorm()
         L = 4 * br.receptive_field + 1
         x = torch.randn(1, 7, L, device=DEV, requires_grad=True)
-        br(x)[0, :, L // 2].sum().backward()
+        br(x, torch.ones(1, 1, L, device=DEV))[0, :, L // 2].sum().backward()
         nz = torch.nonzero(x.grad.abs().sum(1)[0] > 0).flatten()
         extent = int(nz.max() - nz.min() + 1)
-        j = min(i + 1, NET.n_scales)
-        footprint = 4 * (2 ** j - 1) + 1
-        assert extent == br.receptive_field
-        rows.append(f"{'s' + str(i + 1) if i < NET.n_scales else 'coarse'}:{extent}/{footprint}")
-    return "receptive field / starlet footprint (px): " + " ".join(rows)
+        assert extent == br.receptive_field and abs(extent - br.feature_width) <= 0.07 * br.feature_width
+        rows.append(f"{'s' + str(i + 1) if i < NET.n_scales else 'coarse'}: k={br.kernel_size} d={br.dilation} "
+                    f"RF {extent}/{br.feature_width}")
+    return "; ".join(rows)
+
+
+def test_masked_groupnorm():
+    from DESIFlow.eidos.eidos import MaskedGroupNorm
+    torch.manual_seed(1)
+    x = torch.randn(3, 16, 500, device=DEV) * 3 + 1
+    mgn, gn = MaskedGroupNorm(16).to(DEV), torch.nn.GroupNorm(1, 16).to(DEV)
+    e_gn = (mgn(x, torch.ones(3, 1, 500, device=DEV)) - gn(x)).abs().max().item()
+    w = torch.ones(3, 1, 500, device=DEV); w[:, :, 200:300] = 0
+    x2 = x.clone(); x2[:, :, 200:300] = 1e4                                         # garbage where w = 0
+    e_mask = (mgn(x, w) - mgn(x2, w))[:, :, w[0, 0] > 0].abs().max().item()
+    xg = torch.cat([x, torch.zeros(3, 16, 700, device=DEV)], -1)                   # append a 700-px zero gap
+    wg = torch.cat([torch.ones(3, 1, 500, device=DEV), torch.zeros(3, 1, 700, device=DEV)], -1)
+    e_gap = (mgn(xg, wg)[:, :, :500] - mgn(x, torch.ones(3, 1, 500, device=DEV))).abs().max().item()
+    gn_gap = (gn(xg)[:, :, :500] - gn(x)).abs().max().item()
+    assert e_gn < 1e-5 and e_mask < 1e-5 and e_gap < 1e-5
+    return (f"w=1 equals GroupNorm(1) to {e_gn:.1e}; garbage under w=0 leaks {e_mask:.1e}; appending a 700-px zero gap "
+            f"changes valid outputs by {e_gap:.1e} (plain GroupNorm: {gn_gap:.2f})")
+
+
+def test_input_scales():
+    xr, xs = PRE(real_batch())
+    with torch.no_grad():
+        groups, w, _ = NET.scale_groups(xr, xs)
+    g = xr[:, 2] > 0
+    names = ["raw", "smooth+", "smooth-", "support", "flux/s", "log1p(ivar)", "good"]
+    rms = np.array([[float(gr[:, c][g].pow(2).mean().sqrt()) for c in range(7)] for gr in groups])
+    wq = w[:, 0][g]
+    return ("RMS on good px, finest / coarsest-detail / coarse group: "
+            + "; ".join(f"{n} {rms[0, c]:.2f}/{rms[-2, c]:.2f}/{rms[-1, c]:.2f}" for c, n in enumerate(names))
+            + f"  | norm weights on good px: median {wq.median():.3f}, 1st pct {wq.quantile(0.01):.3f}")
 
 
 def test_magnitude_invariance():

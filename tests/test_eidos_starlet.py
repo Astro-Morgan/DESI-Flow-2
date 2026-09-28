@@ -113,13 +113,15 @@ def test_scale_token():
     tok = ScaleToken(d_token=256).to(DEV)
     s = T(10 ** np.linspace(-1, 2, 7))
     e = tok(s)
-    same = (tok(s) - e).abs().max().item()
-    cos = torch.nn.functional.cosine_similarity(e[:-1, 0], e[1:, 0], dim=-1).detach().cpu().numpy()
-    e.sum().backward()
-    grads = all(p.grad is not None and torch.isfinite(p.grad).all() for p in tok.parameters())
-    assert e.shape == (7, 1, 256) and same == 0 and grads
-    return (f"shape {tuple(e.shape)}; deterministic; gradients flow; cosine similarity of neighbours 0.5 dex apart "
-            f"(untrained) {cos.round(3).tolist()}; {sum(p.numel() for p in tok.parameters())} parameters")
+    n_params = sum(p.numel() for p in tok.parameters())
+    recovered = (e[:, 0, 0] - torch.log10(s)).abs().max().item()
+    marker = e[:, 0, 2 * 16 + 1]
+    assert e.shape == (7, 1, 256) and n_params == 0 and recovered < 1e-6 and (marker == 1).all() and (e[:, 0, 34:] == 0).all()
+    try:
+        ScaleToken(d_token=20); raise AssertionError("small d_token accepted")
+    except ValueError:
+        pass
+    return f"shape {tuple(e.shape)}; {n_params} parameters; log10 s recovered from slot 0 to {recovered:.1e}; marker slot = 1; rest zero"
 
 
 def test_gap_handling():

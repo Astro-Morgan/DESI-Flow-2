@@ -1,12 +1,10 @@
 """
-Eidos - The Autoencoder that hosts Plato (the hellinger metric encoder)
-Inception-like CNN + Transformer Masked Denoising Autoencoder
+Inception-like CNN for Eidos/Plato
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 from DESIFlow.eidos.starlet import SmoothStarletPath, RawStarletPath, normalize_raw
 
 _ACT = {"silu": nn.SiLU, "gelu": nn.GELU}
@@ -93,15 +91,15 @@ class CNN(nn.Module):
     """
     Eidos CNN front end.
 
-    1. Magnitude normalization by the per-spectrum scale s = M / N_good (from SmoothStarletPath), applied the same
+    Magnitude normalization by the per-spectrum scale s = M / N_good (from SmoothStarletPath), applied the same
        way to every path, so all inputs are at the same O(1) scale and s is tracked separately (ScaleToken):
          raw:    [flux / s, ivar s^2, good] (normalize_raw) -> RawStarletPath -> raw_i = detail_i / s
          smooth: sign-split sqrt(|detail_i| / s) = sqrtP * sqrt(N_good)   (Hellinger coordinates up to the known
                  per-spectrum factor sqrt(N_good); the metric uses the exact sqrtP)
-    2. Per-scale grouping, for each of the J detail scales and the coarse channel (J+1 groups):
+    Per-scale grouping, for each of the J detail scales and the coarse channel (J+1 groups):
            x_i = [raw_i, smooth_i+, smooth_i-, support_i, flux/s, log1p(ivar s^2), good]     (7 channels, full res)
-    3. One independent CNNBranch per group, feature width = footprint of starlet scale i (coarse: scale J).
-    4. Mixing: concat branch outputs -> 1x1 ConvNormAct -> stride-2 ConvNormAct stages -> 1x1 projection to d_token.
+    One independent CNNBranch per group, feature width = footprint of starlet scale i (coarse: scale J).
+    Mixing: concat branch outputs -> 1x1 ConvNormAct -> stride-2 ConvNormAct stages -> 1x1 projection to d_token.
     Every norm is a MaskedGroupNorm with weights w = good * q, q = ivar/(ivar+1) on normalized ivar (quality="snr",
     down-weights pixels with per-pixel S/N below ~1) or q = 1 (quality="good"); after each stride-2 stage the
     weights are downsampled by the same k=5/stride-2 window (average over valid positions).

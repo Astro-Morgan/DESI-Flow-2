@@ -7,7 +7,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from DESIFlow.eidos.perceiver import Perceiver, CrossAttention
-from DESIFlow.eidos.eidos import CNN
+from DESIFlow.eidos.cnn import CNN
 from DESIFlow.preprocessing.preprocessing import Preprocessor
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")

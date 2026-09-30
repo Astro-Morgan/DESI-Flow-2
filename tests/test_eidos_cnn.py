@@ -1,5 +1,5 @@
 """
-Checks for the Eidos CNN front end (src/DESIFlow/eidos/eidos.py).
+Checks for the Eidos CNN front end (src/DESIFlow/eidos/cnn.py).
 Run directly (python tests/test_eidos_cnn.py) or with pytest.
 """
 import sys, time, math
@@ -9,7 +9,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from DESIFlow.eidos.eidos import CNN
+from DESIFlow.eidos.cnn import CNN
 from DESIFlow.preprocessing.preprocessing import Preprocessor
 
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -61,7 +61,7 @@ def test_branch_receptive_fields_match_feature_widths():
 
 
 def test_masked_groupnorm():
-    from DESIFlow.eidos.eidos import MaskedGroupNorm
+    from DESIFlow.eidos.cnn import MaskedGroupNorm
     torch.manual_seed(1)
     x = torch.randn(3, 16, 500, device=DEV) * 3 + 1
     mgn, gn = MaskedGroupNorm(16).to(DEV), torch.nn.GroupNorm(1, 16).to(DEV)

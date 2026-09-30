@@ -33,8 +33,8 @@ def _rotate(x, pos, omega):
     return torch.cat([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1)
 
 
-def _ffn(d):
-    return nn.Sequential(nn.LayerNorm(d), nn.Linear(d, 4 * d), nn.SiLU(), nn.Linear(4 * d, d))
+def _ffn(d, ratio=4):
+    return nn.Sequential(nn.LayerNorm(d), nn.Linear(d, ratio * d), nn.SiLU(), nn.Linear(ratio * d, d))
 
 
 class CrossAttention(nn.Module):

@@ -29,14 +29,21 @@ from DESIFlow.eidos.perceiver import Perceiver
 from DESIFlow.eidos.decoder import Decoder
 from DESIFlow.eidos.reader import velocity
 
-
 class Eidos(nn.Module):
-    def __init__(self):
+    def __init__(self, cnn_kwargs=None, perceiver_kwargs=None, decoder_kwargs=None):
+        """Defaults are the full model. cnn_kwargs / perceiver_kwargs / decoder_kwargs override the constructor arguments
+        of CNN / Perceiver / Decoder (e.g. a small model for smoke tests). The sizes that must agree across stages are
+        derived unless given: Perceiver d_ctx = CNN d_token; Decoder n_latents, d_latent = the Perceiver's."""
         super().__init__()
+        cnn_kwargs, perceiver_kwargs, decoder_kwargs = dict(cnn_kwargs or {}), dict(perceiver_kwargs or {}), dict(decoder_kwargs or {})
+        perceiver_kwargs.setdefault("d_ctx", cnn_kwargs.get("d_token", 256))
+        decoder_kwargs.setdefault("n_latents", perceiver_kwargs.get("n_latents", 64))
+        decoder_kwargs.setdefault("d_latent", perceiver_kwargs.get("d_latent", 256))
+        self.n_latents, self.d_latent = decoder_kwargs["n_latents"], decoder_kwargs["d_latent"]
         self.preprocessor = Preprocessor()
-        self.cnn = CNN()
-        self.perceiver = Perceiver()
-        self.decoder = Decoder()
+        self.cnn = CNN(**cnn_kwargs)
+        self.perceiver = Perceiver(**perceiver_kwargs)
+        self.decoder = Decoder(**decoder_kwargs)
         # positions in km/s are measured from the first log-lambda pixel, for the encoder tokens and the decoder queries
         self.wave0 = float(self.preprocessor.new_wave[0])
         token_v = Perceiver.token_velocity(self.cnn.token_wave(self.preprocessor.new_wave))

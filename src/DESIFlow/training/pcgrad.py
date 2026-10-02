@@ -45,7 +45,8 @@ def project_out_conflict(g_z, g_rec):
 def backward_with_surgery(loss_rec, loss_z, shared, rec_only, z_only, surgery=True):
     """Sets .grad on every parameter in shared + rec_only + z_only (replacing any existing .grad) and returns statistics:
         cos (g_rec, g_z on the shared parameters, before surgery), conflict (cos < 0), norm_rec, norm_z (shared,
-        before surgery), norm_z_after (shared, after surgery; = norm_z when not projected), surgery (applied or not).
+        before surgery), norm_z_after (shared, after surgery; = norm_z when not projected), surgery (applied or not),
+        along = g_rec . update / |g_rec|^2 on the shared parameters (>= 1 guaranteed with surgery).
     loss_z None (no trusted redshift in the batch) -> plain reconstruction backward, stats = {}."""
     n = len(shared)
     g_rec = torch.autograd.grad(loss_rec, shared + rec_only, retain_graph=loss_z is not None, allow_unused=True)
@@ -67,5 +68,8 @@ def backward_with_surgery(loss_rec, loss_z, shared, rec_only, z_only, surgery=Tr
     nr, nz = nr2.sqrt().item(), nz2.sqrt().item()
     cos = (dot / (nr2.sqrt() * nz2.sqrt())).item() if nr > 0 and nz > 0 else 0.0
     nz_after = _dot(gz_proj, gz_proj).sqrt().item()
+    # progress kept: g_rec . (g_rec + g_z') / |g_rec|^2  -- 1 means the encoder update moves the reconstruction loss exactly
+    # as a reconstruction-only step would; >1 helps it; <1 means the z gradient leaks an adversarial component into the encoder
+    along = 1.0 + (_dot(gz_proj, gr_sh) / nr2).item() if nr > 0 else 1.0
     return {"cos": cos, "conflict": float(cos < 0), "norm_rec": nr, "norm_z": nz, "norm_z_after": nz_after,
-            "surgery": float(surgery and cos < 0)}
+            "surgery": float(surgery and cos < 0), "along": along}

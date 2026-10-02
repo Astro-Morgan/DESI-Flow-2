@@ -204,6 +204,44 @@ def test_pcgrad_on_the_model():
             f"(plain sum falls short), free case: update = g_rec + g_z; finite-difference slope of L_rec matches g_rec.update to 0.2%")
 
 
+def test_fully_adversarial_gradient_never_reaches_the_encoder():
+    """Auxiliary loss = -c * (reconstruction loss through a FROZEN copy of the decoder): its encoder gradient is exactly
+    -c * g_rec (cos = -1). With surgery the encoder update must be exactly g_rec; the plain sum gives (1 - c) g_rec."""
+    from torch.func import functional_call
+    net, head, x, z, hid = _tiny_setup(seed=1)
+    qv = velocity(NATIVE, net.wave0)
+    shared = [p for n, p in net.named_parameters() if n.startswith(("cnn", "perceiver"))]
+    dec = list(net.decoder.parameters())
+    c = 2.0
+
+    def losses():
+        lat = net.encode(apply_hidden(x, hid))
+        s = 10 ** lat[:, 0, 0]
+        rec = hidden_loss(net.decoder(lat[:, 1:], qv), s, x[:, 0], x[:, 1], hid)
+        frozen = {k: v.detach() for k, v in net.decoder.named_parameters()}
+        adv = -c * hidden_loss(functional_call(net.decoder, frozen, (lat[:, 1:], qv)), s, x[:, 0], x[:, 1], hid)
+        return rec, adv
+
+    rec, adv = losses()
+    g_rec = torch.autograd.grad(rec, shared, retain_graph=True)
+    assert all(g is None for g in torch.autograd.grad(adv, dec, retain_graph=True, allow_unused=True)), "frozen decoder must get no gradient"
+    out = {}
+    for surgery in (True, False):
+        for p in shared + dec:
+            p.grad = None
+        rec, adv = losses()
+        st = backward_with_surgery(rec, adv, shared, dec, [], surgery=surgery)
+        out[surgery] = ([p.grad.clone() for p in shared], st)
+    nr = _dot(g_rec, g_rec).sqrt()
+    for gf, gr in zip(out[True][0], g_rec):
+        assert torch.allclose(gf, gr, atol=1e-12, rtol=1e-8), "with surgery the encoder update is exactly g_rec"
+    assert abs(out[True][1]["cos"] + 1) < 1e-9 and abs(out[True][1]["along"] - 1) < 1e-9
+    for gf, gr in zip(out[False][0], g_rec):
+        assert torch.allclose(gf, (1 - c) * gr, atol=1e-12, rtol=1e-8), "plain sum: (1 - c) g_rec"
+    assert abs(out[False][1]["along"] - (1 - c)) < 1e-9
+    return f"cos(g_rec, g_adv) = -1: encoder update == g_rec with surgery (along = 1.000), == (1-c) g_rec = -g_rec with the plain sum (along = {out[False][1]['along']:.3f})"
+
+
 def test_default_eidos_unchanged_and_small_config_shapes():
     full = Eidos()
     n = {k: sum(p.numel() for p in m.parameters()) / 1e6 for k, m in (("cnn", full.cnn), ("perceiver", full.perceiver), ("decoder", full.decoder))}

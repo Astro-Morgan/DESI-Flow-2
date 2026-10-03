@@ -5,7 +5,7 @@ and Plato (learned block queries -> metric coordinates) are both readers; they d
 Cross-attention mirrors the Perceiver's with the roles swapped:
     Perceiver: latents (steered positions) ask spectral tokens (fixed positions)
     Reader:    queries (given positions)   ask latents (each announces its own position)
-    latent i, head h, read l announces  p = b[i, h] + Delta_h(z_i)   (learned base, layer-specific, initialized evenly
+    latent i, head h, read l announces  p = b[i, h] + Delta_h(z_i)   (fixed base buffer, layer-specific, an even tiling
         across the velocity range like the encoder's; Delta = zero-init linear head on the latent's content)
     the rotary half of each head's q is rotated by the query's position v, of k by p -> the score depends on (v - p) and on
     content; the other half is content-only. Values are never rotated. Periods geometric in [min_period, max_period] km/s.
@@ -50,7 +50,7 @@ class ReadLayer(nn.Module):
             periods = torch.logspace(math.log10(min_period), math.log10(max_period), self.n_rot // 2)
             self.register_buffer("omega", 2 * math.pi / periods)
             base = torch.linspace(*v_range, n_latents).view(n_latents, 1).repeat(1, n_heads)
-            self.base = nn.Parameter(base)                                            # (N, H) km/s
+            self.register_buffer("base", base)                                        # (N, H) km/s, fixed (not learned)
             self.delta = nn.Linear(d_latent, n_heads)                                 # zero-init steering head
             nn.init.zeros_(self.delta.weight); nn.init.zeros_(self.delta.bias)
 

@@ -43,17 +43,17 @@ def test_relative_position_equivariance():
     return f"joint shift of 12,345 km/s changes outputs by rel {rel:.1e} (float32 phase round-off)"
 
 
-def test_positions_matter_and_are_learnable():
+def test_positions_matter_and_steering_is_learnable():
     tok, s = torch.randn(2, L, 256, device=DEV), torch.ones(2, device=DEV)
     a = PER(tok, TV, s)
     b = PER(tok.flip(1), TV, s)                                   # same tokens, reversed positions
     PER.zero_grad(); a[:, 1:].pow(2).mean().backward()
     ca = [l for l in PER.layers if isinstance(l, CrossAttention)]
-    g_base = all(l.base.grad is not None and l.base.grad.abs().sum() > 0 for l in ca)
+    assert all(not isinstance(l.base, torch.nn.Parameter) and "base" in l.state_dict() for l in ca), "base must be a fixed buffer (saved, not trained)"
     g_delta = all(l.delta.weight.grad is not None and l.delta.weight.grad.abs().sum() > 0 for l in ca)
     diff = ((a - b)[:, 1:].abs().max() / a[:, 1:].abs().max()).item()
-    assert diff > 1e-2 and g_base and g_delta
-    return f"reversing token order changes latents by rel {diff:.2f}; gradients reach base positions and steering heads in all CA layers"
+    assert diff > 1e-2 and g_delta
+    return f"reversing token order changes latents by rel {diff:.2f}; gradients reach the steering heads in all CA layers (base positions are fixed buffers)"
 
 
 def test_end_to_end_real():

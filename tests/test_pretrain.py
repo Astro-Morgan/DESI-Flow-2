@@ -94,7 +94,7 @@ def test_end_to_end_run_resume_and_outputs():
     out = TMP / "run"
     common = ["--data-dir", str(DATA), "--out", str(out), "--model", "small", "--batch", "4", "--val-n", "8", "--test-n", "8", "--workers", "0",
               "--eval-every", "4", "--recon-every", "4", "--save-every", "4", "--log-every", "2", "--warmup", "2", "--eval-batch", "8",
-              "--plot-z", "0.2,0.8,1.5"]
+              "--plot-z", "0.2,0.8,1.5"] + ([] if torch.cuda.is_available() else ["--cpu"])
     s1 = pretrain.main(common + ["--steps", "8"])
     assert s1["steps_done"] == 8
     for f in ("config.json", "splits.npz", "train_log.jsonl", "eval_log.jsonl", "curves.png", "best.pt", "last.pt", "z_scatter_latest.npz",

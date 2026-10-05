@@ -120,7 +120,10 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     out = Path(args.out)
     (out / "recon").mkdir(parents=True, exist_ok=True)
-    dev = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
+    if not args.cpu and not torch.cuda.is_available():
+        raise RuntimeError("no GPU visible to PyTorch (login node, or a CPU-only torch build?). Run on a GPU node, e.g. "
+                           "`salloc -N 1 -C gpu -q interactive -t 04:00:00 -A <acct>_g --gpus-per-node=1 -c 32`, or pass --cpu to force the CPU.")
+    dev = torch.device("cpu" if args.cpu else "cuda")
     if dev.type == "cuda" and not args.no_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True

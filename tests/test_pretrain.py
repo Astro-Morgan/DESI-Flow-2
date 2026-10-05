@@ -117,6 +117,13 @@ def test_end_to_end_run_resume_and_outputs():
             f"figures and checkpoints written; PCGrad progress kept >= 1 in every logged window")
 
 
+def test_underscore_options_are_accepted():
+    assert pretrain.normalize_argv(["--recon_every", "30", "--out=/a_b/c", "--data-dir", "/x_y"]) == ["--recon-every", "30", "--out=/a_b/c", "--data-dir", "/x_y"]
+    a = pretrain.build_parser().parse_args(pretrain.normalize_argv(["--data-dir", "d", "--out", "o", "--recon_every", "30", "--eval_every", "10"]))
+    assert a.recon_every == 30 and a.eval_every == 10
+    return "--recon_every / --eval_every are read as --recon-every / --eval-every; path values containing underscores are untouched"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -116,13 +116,25 @@ def summarize_data(data, train_idx, n=1000):
           f"from {len(pick)} train rows: good pixel fraction {good.mean():.3f}, median S/N {np.median(sn):.2f} (10-90%: {np.percentile(sn, 10):.2f}..{np.percentile(sn, 90):.2f})", flush=True)
 
 
+def normalize_argv(argv):
+    """--recon_every is accepted as --recon-every (values are left alone)."""
+    out = []
+    for a in (sys.argv[1:] if argv is None else argv):
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            a = name.replace("_", "-") + eq + val
+        out.append(a)
+    return out
+
+
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(normalize_argv(argv))
     out = Path(args.out)
     (out / "recon").mkdir(parents=True, exist_ok=True)
     if not args.cpu and not torch.cuda.is_available():
-        raise RuntimeError("no GPU visible to PyTorch (login node, or a CPU-only torch build?). Run on a GPU node, e.g. "
-                           "`salloc -N 1 -C gpu -q interactive -t 04:00:00 -A <acct>_g --gpus-per-node=1 -c 32`, or pass --cpu to force the CPU.")
+        raise RuntimeError("no GPU visible to PyTorch (a CPU-only torch build, or no GPU allocated to this shell). Check "
+                           "`python -c 'import torch; print(torch.cuda.is_available())'`, or get a GPU node: "
+                           "`salloc -N 1 -C gpu -q interactive -t 04:00:00 -A <acct>_g --gpus-per-node=1 -c 32`. Pass --cpu to force the CPU.")
     dev = torch.device("cpu" if args.cpu else "cuda")
     if dev.type == "cuda" and not args.no_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True

@@ -4,7 +4,7 @@ Perceiver encoder for Eidos: learned latents repeatedly cross-attend to the CNN'
 Cross-attention with query-chosen positions (per layer, per head):
     token k has position v_k = c ln(lambda_k / lambda_0)  (km/s)
     latent i, head h, layer l picks  p = b[i, h] + Delta_h(z_i)
-        b: learned base position (layer-specific), initialized evenly across the token range
+        b: base position (layer-specific), a fixed buffer: an even tiling of the token range (the steering below does the moving)
         Delta: linear head on the latent's current state (zero-init), so positions can be steered by content
     the rotary half of each head's q is rotated by p, of k by v_k  ->  scores depend on (v_k - p) + content;
     the other half is unrotated (content-only matching). Values are never rotated.
@@ -53,7 +53,7 @@ class CrossAttention(nn.Module):
         periods = torch.logspace(math.log10(min_period), math.log10(max_period), max(self.n_rot // 2, 1))
         self.register_buffer("omega", 2 * math.pi / periods)
         base = torch.linspace(*v_range, n_latents).view(n_latents, 1).repeat(1, n_heads)
-        self.base = nn.Parameter(base)                                                # (N, H) km/s
+        self.register_buffer("base", base)                                            # (N, H) km/s, fixed (not learned)
         self.delta = nn.Linear(d_lat, n_heads)                                        # zero-init steering head
         nn.init.zeros_(self.delta.weight); nn.init.zeros_(self.delta.bias)
 

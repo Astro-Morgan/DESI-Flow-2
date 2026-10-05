@@ -105,8 +105,8 @@ def test_gradients_reach_everything():
     reads = [m for m in dec.modules() if isinstance(m, ReadLayer)]
     assert not missing, missing
     assert z.grad is not None and z.grad.abs().sum() > 0
-    assert all(m.base.grad.abs().sum() > 0 and m.delta.weight.grad.abs().sum() > 0 for m in reads)
-    return f"all {len(list(dec.parameters()))} parameter tensors (incl. base positions and steering heads of {len(reads)} reads) and the latents receive gradient"
+    assert all(not isinstance(m.base, torch.nn.Parameter) and m.delta.weight.grad.abs().sum() > 0 for m in reads)
+    return f"all {len(list(dec.parameters()))} parameter tensors (incl. the steering heads of {len(reads)} reads; base positions are fixed buffers) and the latents receive gradient"
 
 
 def test_positionless_reader_for_plato():

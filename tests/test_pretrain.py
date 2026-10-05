@@ -117,11 +117,37 @@ def test_end_to_end_run_resume_and_outputs():
             f"figures and checkpoints written; PCGrad progress kept >= 1 in every logged window")
 
 
-def test_underscore_options_are_accepted():
-    assert pretrain.normalize_argv(["--recon_every", "30", "--out=/a_b/c", "--data-dir", "/x_y"]) == ["--recon-every", "30", "--out=/a_b/c", "--data-dir", "/x_y"]
-    a = pretrain.build_parser().parse_args(pretrain.normalize_argv(["--data-dir", "d", "--out", "o", "--recon_every", "30", "--eval_every", "10"]))
-    assert a.recon_every == 30 and a.eval_every == 10
-    return "--recon_every / --eval_every are read as --recon-every / --eval-every; path values containing underscores are untouched"
+def test_scale_excess_is_one_for_noise_and_flags_structure():
+    from DESIFlow.preprocessing.preprocessing import Preprocessor
+    from DESIFlow.eidos.starlet import RawStarletPath
+    from DESIFlow.training.diagnose import scale_excess
+    torch.manual_seed(0)
+    pre, path = Preprocessor(), RawStarletPath(9)
+    B = 12
+    ivar = torch.full((B, N_PIX), 4.0)
+    mask = torch.zeros(B, N_PIX)
+    noise = torch.randn(B, N_PIX) / 2.0                                              # sigma = 1/sqrt(ivar) = 0.5
+    gen = torch.Generator().manual_seed(1)
+    e0 = scale_excess(pre, path, noise, ivar, mask, gen=gen).median(0).values
+    assert (e0[:7] > 0.8).all() and (e0[:7] < 1.25).all(), e0                    # s8, s9 average few independent samples per spectrum: noisy
+    x = torch.arange(N_PIX, dtype=torch.float32)
+    bump = 1.0 * torch.exp(-0.5 * ((x - 3000) / 60.0) ** 2)                          # 60 px sigma (~48 A, ~2400 km/s), 2 sigma_noise tall
+    e1 = scale_excess(pre, path, noise + bump, ivar, mask, gen=gen).median(0).values
+    assert e1[:5].max() < 1.25 and e1[7:].max() > 2.0, e1                            # fine scales stay at noise, the matching coarse scales light up
+    return (f"pure-noise residual: E_j in [{e0[:7].min():.2f}, {e0[:7].max():.2f}] at scales 1-7 (the two coarsest average few independent samples per spectrum); "
+            f"with a broad bump added: E_1..E_5 <= {e1[:5].max():.2f}, E_8, E_9 = {e1[7]:.1f}, {e1[8]:.1f}")
+
+
+def test_diagnose_runs_on_a_checkpoint():
+    from DESIFlow.training import diagnose
+    out = TMP / "run"
+    rep = diagnose.main(["--data-dir", str(DATA), "--run-dir", str(out), "--n", "8", "--batch", "4"] + ([] if torch.cuda.is_available() else ["--cpu"]))
+    assert (out / "diagnose.json").exists() and len(rep["bins"]) >= 1
+    b = rep["bins"][0]
+    assert len(b["E_unmasked"]) == 10 and np.isfinite(b["E_unmasked"]).all() and np.isfinite(b["E_hidden"]).all() and np.isfinite(b["chi2_unmasked"])
+    ev = [json.loads(l) for l in (out / "eval_log.jsonl").read_text().splitlines()]
+    assert "masked_chi2_by_snr" in ev[-1] and "unmasked_chi2_by_snr" in ev[-1]
+    return f"diagnose ran on best.pt: {len(rep['bins'])} S/N bins, 10 starlet scales, json written; eval_log now carries chi2 by S/N bin"
 
 
 if __name__ == "__main__":

@@ -58,6 +58,21 @@ The log prints samples/s, GPU peak memory and `data wait` (ms per step spent wai
 - `git pull` on the cluster after each push; the module is run from source (`PYTHONPATH=$PWD/src`), nothing to install.
 - Shell scripts must keep LF line endings (`.gitattributes` enforces it for `*.sbatch` / `*.sh`).
 
+## Where is the residual? (diagnose)
+
+```bash
+python -u -m DESIFlow.training.diagnose --data-dir $DATA --run-dir $OUT --ckpt best.pt --n 2048
+```
+
+Passes the validation residual (data - model, with the quoted ivar) through the model's own preprocessor and the weighted starlet, and compares the power at
+each scale (s1 ~ 46 km/s ... s9 ~ 12,000 km/s) with simulated pure noise: E_j = 1 means noise, above 1 means structure the model misses (or noise the quoted ivar
+understates; scale 1 is almost pure noise, so E_1 checks the ivar calibration). Printed per S/N bin for the denoised output (nothing hidden) and for the
+hidden spans only, with chi2 per pixel, chi2 of 8-pixel bins and the fraction of hidden pixels beyond 5 sigma. Writes `diagnose.json` and `diagnose.png`.
+The evaluation log now also carries `masked_chi2_by_snr` / `unmasked_chi2_by_snr`, and the training log `frac_beyond` (fraction of hidden pixels beyond the Huber threshold).
+
+Loss and optimizer switches for ablations: `--huber 0` (plain chi2; the default Huber(5 sigma) caps the gradient of every pixel beyond 5 sigma), `--steer-lr-mult 0.1`
+(slower position steering), `--head-lr-mult`.
+
 ## Limits
 
 Single GPU only (PCGrad calls `autograd.grad` outside `.backward()`, so DDP would not synchronize those gradients; multi-GPU needs a manual all-reduce).

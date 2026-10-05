@@ -51,6 +51,9 @@ def build_parser():
     ap.add_argument("--clip", type=float, default=1000.0, help="global grad-norm clip (the grad norm starts in the thousands and falls to tens)")
     ap.add_argument("--huber", type=float, default=5.0, help="Huber threshold in sigma for the reconstruction loss (0 = plain chi2)")
     ap.add_argument("--z-weight", type=float, default=1.0)
+    ap.add_argument("--steer-lr-mult", type=float, default=1.0,
+                    help="LR multiplier for the position-steering heads (positions move by delta_scale = 1e4 km/s per unit: a full-LR Adam step "
+                         "can shift a latent by hundreds of km/s, comparable to a narrow line)")
     ap.add_argument("--head-lr-mult", type=float, default=0.02,
                     help="LR multiplier for the z head. The flat head reads 64x256 latents: one Adam step at the full LR can move its output by ~9 "
                          "(target std 0.35), which blows up the z loss and its gradient into the encoder")
@@ -116,25 +119,13 @@ def summarize_data(data, train_idx, n=1000):
           f"from {len(pick)} train rows: good pixel fraction {good.mean():.3f}, median S/N {np.median(sn):.2f} (10-90%: {np.percentile(sn, 10):.2f}..{np.percentile(sn, 90):.2f})", flush=True)
 
 
-def normalize_argv(argv):
-    """--recon_every is accepted as --recon-every (values are left alone)."""
-    out = []
-    for a in (sys.argv[1:] if argv is None else argv):
-        if a.startswith("--"):
-            name, eq, val = a.partition("=")
-            a = name.replace("_", "-") + eq + val
-        out.append(a)
-    return out
-
-
 def main(argv=None):
-    args = build_parser().parse_args(normalize_argv(argv))
+    args = build_parser().parse_args(argv)
     out = Path(args.out)
     (out / "recon").mkdir(parents=True, exist_ok=True)
     if not args.cpu and not torch.cuda.is_available():
-        raise RuntimeError("no GPU visible to PyTorch (a CPU-only torch build, or no GPU allocated to this shell). Check "
-                           "`python -c 'import torch; print(torch.cuda.is_available())'`, or get a GPU node: "
-                           "`salloc -N 1 -C gpu -q interactive -t 04:00:00 -A <acct>_g --gpus-per-node=1 -c 32`. Pass --cpu to force the CPU.")
+        raise RuntimeError("no GPU visible to PyTorch (login node, or a CPU-only torch build?). Run on a GPU node, e.g. "
+                           "`salloc -N 1 -C gpu -q interactive -t 04:00:00 -A <acct>_g --gpus-per-node=1 -c 32`, or pass --cpu to force the CPU.")
     dev = torch.device("cpu" if args.cpu else "cuda")
     if dev.type == "cuda" and not args.no_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -162,9 +153,12 @@ def main(argv=None):
     shared = [p for n, p in model.named_parameters() if n.startswith(("cnn", "perceiver"))]
     dec = list(model.decoder.parameters())
     hp = list(head.parameters()) if head else []
-    decay = [p for n, p in named if p.ndim >= 2 and not n.startswith("zhead")]
-    no_decay = [p for n, p in named if p.ndim < 2 and not n.startswith("zhead")]
+    is_steer = lambda n: ".delta." in n
+    decay = [p for n, p in named if p.ndim >= 2 and not n.startswith("zhead") and not is_steer(n)]
+    no_decay = [p for n, p in named if p.ndim < 2 and not n.startswith("zhead") and not is_steer(n)]
+    steer = [p for n, p in named if is_steer(n)]
     groups = [{"params": decay, "weight_decay": args.wd, "mult": 1.0}, {"params": no_decay, "weight_decay": 0.0, "mult": 1.0},
+              {"params": steer, "weight_decay": 0.0, "mult": args.steer_lr_mult},
               {"params": hp, "weight_decay": 0.0, "mult": args.head_lr_mult}]
     opt = torch.optim.AdamW([g for g in groups if g["params"]], lr=args.lr, betas=(0.9, 0.99))
     n_par = {k: sum(p.numel() for n, p in named if n.startswith(k)) for k in ("cnn", "perceiver", "decoder", "zhead")}
@@ -276,6 +270,7 @@ def main(argv=None):
             with autocast():
                 pv = model.decoder(lat[:, 1:].detach(), qv[vi])
             chi2_v = ((flux.gather(1, vi) - s.unsqueeze(-1) * pv.float()) ** 2 * ivar.gather(1, vi) * vw).sum() / vw.sum().clamp_min(1)
+            frac_beyond = ((r2 > (huber or 5.0) ** 2) & qw).sum() / qw.sum().clamp_min(1)       # hidden pixels beyond the Huber threshold (gradient capped)
             n_h, n_v = hidden.sum(), (good & ~hidden).sum()
             chi2_t = (n_h * chi2_h + n_v * chi2_v) / (n_h + n_v).clamp_min(1)
         if head is None or loss_z is None:
@@ -291,7 +286,7 @@ def main(argv=None):
             continue
         bad_streak = 0
         opt.step()
-        row = {"loss_rec": loss_rec.item(), "chi2_hidden": chi2_h.item(), "chi2_visible": chi2_v.item(), "chi2_total": chi2_t.item(), "grad_norm": gn,
+        row = {"loss_rec": loss_rec.item(), "chi2_hidden": chi2_h.item(), "chi2_visible": chi2_v.item(), "chi2_total": chi2_t.item(), "frac_beyond": frac_beyond.item(), "grad_norm": gn,
                "clipped": float(gn > args.clip), "data_wait": t_wait}
         if loss_z is not None:
             row["z_loss"] = loss_z.item() / args.z_weight

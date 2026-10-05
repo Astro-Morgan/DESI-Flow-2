@@ -15,6 +15,7 @@ from DESIFlow.training.masking import SpanMasker, apply_hidden, N_PIX
 from DESIFlow.training.loss import hidden_loss
 
 Z_BINS = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 100.0]
+SNR_BINS = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 1e9]
 
 
 class Evaluator:
@@ -80,6 +81,9 @@ class Evaluator:
                "val_total_chi2": cat["good_r2"].sum() / cat["good_n"].sum(), "val_unmasked_chi2": cat["unm_r2"].sum() / cat["good_n"].sum(),
                "val_unmasked_bin8": cat["bin_chi"].sum() / cat["bin_n"].sum(), "val_hidden_fraction": cat["hid_n"].sum() / cat["good_n"].sum()}
         out["masked_chi2_by_z"] = {f"{Z_BINS[k]:g}-{Z_BINS[k + 1]:g}": float(cat["hid_r2"][zb == k].sum() / max(cat["hid_n"][zb == k].sum(), 1)) for k in range(len(Z_BINS) - 1) if (zb == k).any()}
+        sb = np.digitize(self.snr, SNR_BINS) - 1
+        out["masked_chi2_by_snr"] = {f"{SNR_BINS[k]:g}-{SNR_BINS[k + 1]:g}": float(cat["hid_r2"][sb == k].sum() / max(cat["hid_n"][sb == k].sum(), 1)) for k in range(len(SNR_BINS) - 1) if (sb == k).any()}
+        out["unmasked_chi2_by_snr"] = {f"{SNR_BINS[k]:g}-{SNR_BINS[k + 1]:g}": float(cat["unm_r2"][sb == k].sum() / max(cat["good_n"][sb == k].sum(), 1)) for k in range(len(SNR_BINS) - 1) if (sb == k).any()}
         scatter = None
         if head is not None:
             lp = torch.cat(zpred).double().cpu().numpy()

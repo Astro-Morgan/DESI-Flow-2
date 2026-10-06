@@ -27,7 +27,12 @@ sbatch slurm/pretrain_perlmutter.sbatch          # edit the account / paths firs
 ```
 
 Defaults: full 12.4M-parameter model, `--arm pcgrad` (z head + PCGrad; `plain` = same head, plain gradient sum; `none` = reconstruction only),
-AdamW lr 5e-4 with 1000 warm-up steps and cosine decay to 10%, clip 1000, Huber 5 sigma, TF32 on, batch 64, 4096 validation + 4096 test rows held out.
+AdamW lr 5e-4 with 1000 warm-up steps and cosine decay to 10%, clip 1000 (encoder and head clipped separately), TF32 on, batch 64, 4096 validation + 4096 test rows held out.
+
+Version-2 training choices (decided 2026-10-06, see memory `pretrain-v2-decisions`): reconstruction = plain ivar-weighted chi2 on the hidden pixels (`--huber 0`);
+hidden fraction uniform 5-75% (`--mask-frac-min/-max`); brightness-tied noise degradation of the model INPUT (`--degrade`, `--q-floor 1`, `--degrade-power 2`: g_max = S/N / q_floor,
+log g = log g_max * u^2, noise pattern from a donor object, targets stay the original data; `--no-degrade` turns it off); z loss = 1/2 log(D^2 + eps^2) with eps = 1000 km/s (`--z-loss log`, `--z-eps-kms`;
+`--z-loss mse` is the first run's loss) with the z gradient on the shared encoder capped at the reconstruction gradient's norm (`--z-grad-cap`); `curves.png` gains E_1 by S/N, E_j per scale and the cap / degradation traces.
 `--head-lr-mult 0.02`: the flat z head has 16,384 inputs and one full-LR Adam step can move its output by ~9 (target std 0.35).
 
 ## Outputs (RUN_DIR)

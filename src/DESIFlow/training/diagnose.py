@@ -24,28 +24,9 @@ from DESIFlow.eidos.starlet import RawStarletPath
 from DESIFlow.training.data import PretrainData
 from DESIFlow.training.evaluation import Evaluator
 from DESIFlow.training.masking import apply_hidden, N_PIX
+from DESIFlow.training.scales import scale_power, scale_excess      # noqa: F401  (re-exported)
 
 SNR_EDGES = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 1e9]
-
-
-@torch.no_grad()
-def scale_power(pre, path, resid, ivar, mask, noise=None):
-    """Mean squared starlet coefficient per scale (B, J+1) of a native-grid spectrum [resid, ivar, mask] on the model's lattice, over good lattice pixels."""
-    xr, _ = pre(torch.stack([resid if noise is None else noise, ivar, mask], 1))
-    ch = path(xr)
-    good = (xr[:, 2] > 0).unsqueeze(1)
-    return (ch ** 2 * good).sum(-1) / good.sum(-1).clamp_min(1)
-
-
-@torch.no_grad()
-def scale_excess(pre, path, resid, ivar, mask, n_noise=2, gen=None):
-    """Per-object excess E (B, J+1) = residual power / pure-noise power at each starlet scale."""
-    num = scale_power(pre, path, resid, ivar, mask)
-    den = torch.zeros_like(num)
-    sig = torch.where(ivar > 0, ivar.clamp_min(1e-30).rsqrt(), torch.zeros_like(ivar))
-    for _ in range(n_noise):
-        den += scale_power(pre, path, resid, ivar, mask, noise=torch.randn(ivar.shape, device=ivar.device, generator=gen) * sig) / n_noise
-    return num / den.clamp_min(1e-30)
 
 
 def load_model(run_dir, ckpt, dev):
@@ -71,7 +52,8 @@ def main(argv=None):
     seed = ck["args"]["seed"] if "args" in ck else 0
     data = PretrainData(args.data_dir)
     val_idx = np.load(run / "splits.npz")["val"][:args.n]
-    ev = Evaluator(data, val_idx, dev, seed=seed, chunk=args.batch)
+    a_ck = ck.get("args", {})                                                         # the masks the run was validated with (older runs: 5-40%)
+    ev = Evaluator(data, val_idx, dev, seed=seed, chunk=args.batch, mask_frac=(a_ck.get("mask_frac_min", 0.05), a_ck.get("mask_frac_max", 0.40)))
     qv = velocity(torch.linspace(3600., 9824., N_PIX, dtype=torch.float64, device=dev), model.wave0)
     path = RawStarletPath(9).to(dev)
     gen = torch.Generator(device=dev).manual_seed(0)

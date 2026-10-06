@@ -242,6 +242,28 @@ def test_fully_adversarial_gradient_never_reaches_the_encoder():
     return f"cos(g_rec, g_adv) = -1: encoder update == g_rec with surgery (along = 1.000), == (1-c) g_rec = -g_rec with the plain sum (along = {out[False][1]['along']:.3f})"
 
 
+def test_z_gradient_cap_keeps_the_guarantee():
+    net, head, x, z, hid = _tiny_setup(seed=2)
+    qv = velocity(NATIVE, net.wave0)
+    shared = [p for n, p in net.named_parameters() if n.startswith(("cnn", "perceiver"))]
+    dec = list(net.decoder.parameters())
+    hp = list(head.parameters())
+
+    def run(weight, cap):
+        for p in shared + dec + hp:
+            p.grad = None
+        rec, lz = _losses(net, head, x, z, hid, qv)
+        return backward_with_surgery(rec, weight * lz, shared, dec, hp, surgery=True, z_cap=cap)
+    probe = run(1.0, False)
+    w = 5.0 * probe["norm_rec"] / probe["norm_z"]                                            # a z loss made 5x louder than reconstruction
+    st0, st1 = run(w, False), run(w, True)
+    assert st0["norm_z_after"] > 3.0 * st0["norm_rec"], "the loud z gradient must exceed the reconstruction gradient without the cap"
+    assert abs(st1["norm_z_after"] - st1["norm_rec"]) < 1e-9 * st1["norm_rec"] and st1["z_cap"] < 1.0, st1
+    assert st1["along"] >= 1 - 1e-9, "the cap keeps the PCGrad guarantee"
+    return (f"loud z loss: |g_z'| = {st0['norm_z_after'] / st0['norm_rec']:.1f} |g_rec| without the cap; with it exactly |g_rec| (scale {st1['z_cap']:.3f}), "
+            f"along = {st1['along']:.3f} >= 1")
+
+
 def test_default_eidos_unchanged_and_small_config_shapes():
     full = Eidos()
     n = {k: sum(p.numel() for p in m.parameters()) / 1e6 for k, m in (("cnn", full.cnn), ("perceiver", full.perceiver), ("decoder", full.decoder))}

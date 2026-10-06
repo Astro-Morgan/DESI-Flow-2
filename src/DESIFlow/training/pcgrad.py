@@ -42,11 +42,13 @@ def project_out_conflict(g_z, g_rec):
     return g_z, dot, nr2, nz2
 
 
-def backward_with_surgery(loss_rec, loss_z, shared, rec_only, z_only, surgery=True):
+def backward_with_surgery(loss_rec, loss_z, shared, rec_only, z_only, surgery=True, z_cap=False):
     """Sets .grad on every parameter in shared + rec_only + z_only (replacing any existing .grad) and returns statistics:
         cos (g_rec, g_z on the shared parameters, before surgery), conflict (cos < 0), norm_rec, norm_z (shared,
         before surgery), norm_z_after (shared, after surgery; = norm_z when not projected), surgery (applied or not),
         along = g_rec . update / |g_rec|^2 on the shared parameters (>= 1 guaranteed with surgery).
+    z_cap: after the surgery, scale the z gradient on the shared parameters down so that its norm never exceeds the reconstruction gradient's (the z
+        head is a guest: never louder than reconstruction; keeps along >= 1); stat z_cap = the scale applied (1 = not binding).
     loss_z None (no trusted redshift in the batch) -> plain reconstruction backward, stats = {}."""
     n = len(shared)
     g_rec = torch.autograd.grad(loss_rec, shared + rec_only, retain_graph=loss_z is not None, allow_unused=True)
@@ -58,6 +60,12 @@ def backward_with_surgery(loss_rec, loss_z, shared, rec_only, z_only, surgery=Tr
     g_z = torch.autograd.grad(loss_z, shared + z_only, allow_unused=True)
     gr_sh, gz_sh = list(g_rec[:n]), list(g_z[:n])
     gz_proj, dot, nr2, nz2 = project_out_conflict(gz_sh, gr_sh) if surgery else (gz_sh, _dot(gz_sh, gr_sh), _dot(gr_sh, gr_sh), _dot(gz_sh, gz_sh))
+    cap = 1.0
+    if z_cap:
+        nza, nra = _dot(gz_proj, gz_proj).sqrt().item(), nr2.sqrt().item()
+        if nza > nra > 0:
+            cap = nra / nza
+            gz_proj = [None if g is None else g * cap for g in gz_proj]
     for p, gr, gz in zip(shared, gr_sh, gz_proj):
         gr = zeros(p) if gr is None else gr
         p.grad = gr if gz is None else gr + gz
@@ -72,4 +80,4 @@ def backward_with_surgery(loss_rec, loss_z, shared, rec_only, z_only, surgery=Tr
     # as a reconstruction-only step would; >1 helps it; <1 means the z gradient leaks an adversarial component into the encoder
     along = 1.0 + (_dot(gz_proj, gr_sh) / nr2).item() if nr > 0 else 1.0
     return {"cos": cos, "conflict": float(cos < 0), "norm_rec": nr, "norm_z": nz, "norm_z_after": nz_after,
-            "surgery": float(surgery and cos < 0), "along": along}
+            "surgery": float(surgery and cos < 0), "along": along, "z_cap": cap}

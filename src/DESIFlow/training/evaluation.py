@@ -11,23 +11,28 @@ chi2 = mean of (flux - s * output)^2 * ivar over the pixels, so pure noise gives
 from collections import defaultdict
 import numpy as np
 import torch
+from DESIFlow.eidos.starlet import RawStarletPath
 from DESIFlow.training.masking import SpanMasker, apply_hidden, N_PIX
 from DESIFlow.training.loss import hidden_loss
+from DESIFlow.training.scales import scale_excess
 
 Z_BINS = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 100.0]
 SNR_BINS = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 1e9]
 
 
 class Evaluator:
-    def __init__(self, data, val_idx, device, seed=0, chunk=64, plot_z=(0.3, 1.0, 2.0, 3.0, 4.0), huber_c=5.0):
+    def __init__(self, data, val_idx, device, seed=0, chunk=64, plot_z=(0.3, 1.0, 2.0, 3.0, 4.0), huber_c=None, mask_frac=(0.05, 0.40),
+                 z_eps=1000.0 / 299792.458, z_loss="log"):
         self.device, self.chunk, self.huber_c = device, chunk, huber_c
+        self.z_eps, self.z_loss_kind, self.seed = z_eps, z_loss, seed
+        self.starlet = RawStarletPath(9).to(device)
         flux, ivar, mask = data.read(val_idx)
         self.n = len(val_idx)
         self.flux, self.ivar, self.mask = (torch.tensor(a, device=device) for a in (flux, ivar, mask))
         self.z = torch.tensor(data.z[val_idx], dtype=torch.float32, device=device)
         self.z_ok = torch.tensor(data.trusted(val_idx), device=device)
         good = (mask == 0) & (ivar > 0)
-        masker = SpanMasker()
+        masker = SpanMasker(frac=mask_frac)
         self.hidden = torch.tensor(np.concatenate([masker.sample(good[i:i + 1], np.random.default_rng([seed, 31, i]))[0] for i in range(self.n)]), device=device)
         self.snr = np.array([np.median((flux[i] * np.sqrt(ivar[i]))[good[i]]) if good[i].any() else 0.0 for i in range(self.n)])
         self.plot_pos = self._pick_plot_objects(np.asarray(data.z[val_idx]), plot_z)
@@ -51,7 +56,8 @@ class Evaluator:
         was_training = model.training
         model.eval()
         per = defaultdict(list)
-        zpred = []
+        zpred, excess = [], []
+        gen = torch.Generator(device=self.device).manual_seed(self.seed + 777)
         for a in range(0, self.n, self.chunk):
             sl = slice(a, a + self.chunk)
             flux, ivar, mask, hid = self.flux[sl], self.ivar[sl], self.mask[sl], self.hidden[sl]
@@ -67,6 +73,7 @@ class Evaluator:
             lat_u = model.encode(x)
             s_u = 10 ** lat_u[:, 0, 0]
             res = flux - s_u.unsqueeze(-1) * model.decoder(lat_u[:, 1:], qv)
+            excess.append(scale_excess(model.preprocessor, self.starlet, res, ivar, mask, gen=gen).cpu())
             per["unm_r2"].append((res ** 2 * ivar * good).sum(1))
             w8 = (ivar * good)[:, :7776].reshape(len(x), -1, 8)
             num, den = (w8 * res[:, :7776].reshape(len(x), -1, 8)).sum(-1), w8.sum(-1)
@@ -84,6 +91,9 @@ class Evaluator:
         sb = np.digitize(self.snr, SNR_BINS) - 1
         out["masked_chi2_by_snr"] = {f"{SNR_BINS[k]:g}-{SNR_BINS[k + 1]:g}": float(cat["hid_r2"][sb == k].sum() / max(cat["hid_n"][sb == k].sum(), 1)) for k in range(len(SNR_BINS) - 1) if (sb == k).any()}
         out["unmasked_chi2_by_snr"] = {f"{SNR_BINS[k]:g}-{SNR_BINS[k + 1]:g}": float(cat["unm_r2"][sb == k].sum() / max(cat["good_n"][sb == k].sum(), 1)) for k in range(len(SNR_BINS) - 1) if (sb == k).any()}
+        Eall = torch.cat(excess).double().numpy()                                            # (n, J+1) per-object excess over pure noise
+        out["E_by_scale"] = [float(v) for v in np.median(Eall, 0)]
+        out["E1_by_snr"] = {f"{SNR_BINS[k]:g}-{SNR_BINS[k + 1]:g}": float(np.median(Eall[sb == k, 0])) for k in range(len(SNR_BINS) - 1) if (sb == k).sum() >= 2}
         scatter = None
         if head is not None:
             lp = torch.cat(zpred).double().cpu().numpy()
@@ -91,11 +101,13 @@ class Evaluator:
             zp = np.expm1(lp)
             dz = (zp - z) / (1 + z)
             dzo = dz[ok]
-            out.update({"z_rmse_log1p": float(np.sqrt(np.mean((lp - np.log1p(z))[ok] ** 2))), "z_bias": float(np.median(dzo)),
+            d_log = (lp - np.log1p(z))[ok]
+            zl = 0.5 * np.log(d_log ** 2 + self.z_eps ** 2) if self.z_loss_kind == "log" else d_log ** 2
+            out.update({"val_z_loss": float(zl.mean()), "z_rmse_log1p": float(np.sqrt(np.mean(d_log ** 2))), "z_bias": float(np.median(dzo)),
                         "z_sigma_nmad": float(1.4826 * np.median(np.abs(dzo - np.median(dzo)))), "z_cat_frac": float(np.mean(np.abs(dzo) > 0.15))})
             scatter = (z, zp)
         model.train(was_training)
-        return {k: (float(v) if not isinstance(v, dict) else v) for k, v in out.items()}, scatter
+        return {k: (float(v) if not isinstance(v, (dict, list)) else v) for k, v in out.items()}, scatter
 
     @torch.no_grad()
     def plot_items(self, model, head, qv):

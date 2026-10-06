@@ -49,8 +49,19 @@ def build_parser():
     ap.add_argument("--min-lr-frac", type=float, default=0.1, help="cosine decay floor as a fraction of --lr")
     ap.add_argument("--wd", type=float, default=0.01)
     ap.add_argument("--clip", type=float, default=1000.0, help="global grad-norm clip (the grad norm starts in the thousands and falls to tens)")
-    ap.add_argument("--huber", type=float, default=5.0, help="Huber threshold in sigma for the reconstruction loss (0 = plain chi2)")
+    ap.add_argument("--huber", type=float, default=0.0, help="Huber threshold in sigma for the reconstruction loss (default 0 = plain ivar-weighted chi2 on the hidden pixels)")
+    ap.add_argument("--mask-frac-min", type=float, default=0.05, help="hidden fraction of the good pixels drawn per view: uniform on [min, max]")
+    ap.add_argument("--mask-frac-max", type=float, default=0.75)
+    ap.add_argument("--degrade", action=argparse.BooleanOptionalAction, default=True,
+                    help="brightness-tied noise degradation of the model INPUT (targets stay the original data); see training/data.py")
+    ap.add_argument("--q-floor", type=float, default=1.0, help="single-exposure per-pixel S/N: g_max = q/q_floor, objects with q <= q_floor are never degraded")
+    ap.add_argument("--degrade-power", type=float, default=2.0, help="log g = log g_max * u**power, u uniform: >1 favors mild degradation")
     ap.add_argument("--z-weight", type=float, default=1.0)
+    ap.add_argument("--z-loss", choices=["log", "mse"], default="log",
+                    help="log: 1/2 log(D^2 + eps^2), D = log1p(z_pred) - log1p(z); mse: D^2 (what the first run used)")
+    ap.add_argument("--z-eps-kms", type=float, default=1000.0, help="precision floor of the log z loss in km/s (DESI's standard 1000 km/s cut)")
+    ap.add_argument("--z-grad-cap", action=argparse.BooleanOptionalAction, default=True,
+                    help="cap the z gradient on the shared encoder at the reconstruction gradient's norm (the log loss gradient grows as the error shrinks)")
     ap.add_argument("--steer-lr-mult", type=float, default=1.0,
                     help="LR multiplier for the position-steering heads (positions move by delta_scale = 1e4 km/s per unit: a full-LR Adam step "
                          "can shift a latent by hundreds of km/s, comparable to a narrow line)")
@@ -150,6 +161,7 @@ def main(argv=None):
         head = ZHead(model.n_latents, model.d_latent, "flat").to(dev)
     named = list(model.named_parameters()) + [("zhead." + n, p) for n, p in (head.named_parameters() if head else [])]
     params = [p for _, p in named]
+    body = [p for n, p in named if not n.startswith("zhead")]
     shared = [p for n, p in model.named_parameters() if n.startswith(("cnn", "perceiver"))]
     dec = list(model.decoder.parameters())
     hp = list(head.parameters()) if head else []
@@ -187,10 +199,12 @@ def main(argv=None):
                "gpu": torch.cuda.get_device_name(0) if dev.type == "cuda" else None}, open(out / "config.json", "w"), indent=1)
 
     plot_z = [float(s) for s in args.plot_z.split(",")]
-    evaluator = Evaluator(data, val_idx, dev, seed=args.seed, chunk=args.eval_batch, plot_z=plot_z, huber_c=args.huber or None)
+    z_eps = args.z_eps_kms / 299792.458
+    evaluator = Evaluator(data, val_idx, dev, seed=args.seed, chunk=args.eval_batch, plot_z=plot_z, huber_c=args.huber or None,
+                          mask_frac=(args.mask_frac_min, args.mask_frac_max), z_eps=z_eps, z_loss=args.z_loss)
     print(f"plotted validation spectra (z): {[round(float(evaluator.z[p]), 3) for p in evaluator.plot_pos]}", flush=True)
-    masker = SpanMasker()
-    ds = StepBatches(data, train_idx, args.batch, args.seed, masker)
+    masker = SpanMasker(frac=(args.mask_frac_min, args.mask_frac_max))
+    ds = StepBatches(data, train_idx, args.batch, args.seed, masker, degrade=args.degrade, q_floor=args.q_floor, degrade_power=args.degrade_power)
     print(f"{ds.steps_per_epoch} steps per epoch at batch {args.batch}; steps {start} -> {args.steps} = {(args.steps - start) / ds.steps_per_epoch:.2f} epochs", flush=True)
     loader = torch.utils.data.DataLoader(ds, batch_size=None, sampler=range(start, args.steps), num_workers=workers,
                                          prefetch_factor=4 if workers else None, pin_memory=dev.type == "cuda")
@@ -229,9 +243,10 @@ def main(argv=None):
                 plot_reconstructions(items, step_done, out / "recon" / "latest.png")
         except ImportError:
             print("matplotlib missing: skipping figures (logs are still written)", flush=True)
+        e1 = " | E1 " + ", ".join(f"{k}:{v:.2f}" for k, v in metrics.get("E1_by_snr", {}).items())
         zs = f" | z sigma_NMAD {metrics['z_sigma_nmad']:.4f} cat {metrics['z_cat_frac']:.3f} rmse(log1p) {metrics['z_rmse_log1p']:.3f}" if head else ""
         print(f"[eval @ {step_done}] masked chi2 {metrics['val_masked_chi2']:.3f} | total (masked in) {metrics['val_total_chi2']:.3f} | unmasked {metrics['val_unmasked_chi2']:.3f} "
-              f"bin8 {metrics['val_unmasked_bin8']:.2f}{zs} | {args.select}-best {best:.3f}{' *NEW BEST*' if row.get('new_best') else ''} ({row['eval_seconds']:.0f}s)", flush=True)
+              f"bin8 {metrics['val_unmasked_bin8']:.2f}{zs}{e1} | {args.select}-best {best:.3f}{' *NEW BEST*' if row.get('new_best') else ''} ({row['eval_seconds']:.0f}s)", flush=True)
 
     model.train()
     acc, n_acc, bad_streak = {}, 0, 0
@@ -242,8 +257,8 @@ def main(argv=None):
         for g in opt.param_groups:
             g["lr"] = lr_at(step, args) * g["mult"]
         b = {k: v.to(dev, non_blocking=True) for k, v in batch.items()}
-        flux, ivar, mask, hidden = b["flux"], b["ivar"], b["mask"], b["hidden"]
-        x = torch.stack([flux, ivar, mask], 1)
+        flux, ivar, mask, hidden = b["flux"], b["ivar"], b["mask"], b["hidden"]              # ORIGINAL data: the loss targets
+        x = torch.stack([b["flux_in"], b["ivar_in"], mask], 1)                                 # model input: degraded for bright objects
         good = (mask == 0) & (ivar > 0)
         for p in params:
             p.grad = None
@@ -256,7 +271,8 @@ def main(argv=None):
         loss_rec = hidden_loss(pred.float(), s, fq, iq, qw, huber)
         loss_z, stats = None, {}
         if head is not None:
-            loss_z = args.z_weight * ZHead.loss(head(lat[:, 1:].float()), b["z"], b["z_ok"])
+            pz = head(lat[:, 1:].float())
+            loss_z = args.z_weight * (ZHead.log_loss(pz, b["z"], b["z_ok"], z_eps) if args.z_loss == "log" else ZHead.loss(pz, b["z"], b["z_ok"]))
         if not torch.isfinite(loss_rec):
             bad_streak += 1
             print(f"step {step}: non-finite loss, step skipped ({bad_streak} in a row)", flush=True)
@@ -276,8 +292,10 @@ def main(argv=None):
         if head is None or loss_z is None:
             loss_rec.backward()
         else:
-            stats = backward_with_surgery(loss_rec, loss_z, shared, dec, hp, surgery=(args.arm == "pcgrad"))
-        gn = float(torch.nn.utils.clip_grad_norm_(params, args.clip))
+            stats = backward_with_surgery(loss_rec, loss_z, shared, dec, hp, surgery=(args.arm == "pcgrad"), z_cap=args.z_grad_cap)
+        gn = float(torch.nn.utils.clip_grad_norm_(body, args.clip))                     # the head is clipped on its own: its (log-loss) gradient must not shrink the encoder's
+        if hp:
+            torch.nn.utils.clip_grad_norm_(hp, args.clip)
         if not math.isfinite(gn):
             bad_streak += 1
             print(f"step {step}: non-finite gradient, step skipped ({bad_streak} in a row)", flush=True)
@@ -287,7 +305,7 @@ def main(argv=None):
         bad_streak = 0
         opt.step()
         row = {"loss_rec": loss_rec.item(), "chi2_hidden": chi2_h.item(), "chi2_visible": chi2_v.item(), "chi2_total": chi2_t.item(), "frac_beyond": frac_beyond.item(), "grad_norm": gn,
-               "clipped": float(gn > args.clip), "data_wait": t_wait}
+               "clipped": float(gn > args.clip), "data_wait": t_wait, "g_mean": b["g"].mean().item(), "frac_degraded": (b["g"] > 1.05).float().mean().item()}
         if loss_z is not None:
             row["z_loss"] = loss_z.item() / args.z_weight
         row.update(stats)

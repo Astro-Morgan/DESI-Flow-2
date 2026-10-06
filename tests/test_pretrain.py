@@ -150,6 +150,62 @@ def test_diagnose_runs_on_a_checkpoint():
     return f"diagnose ran on best.pt: {len(rep['bins'])} S/N bins, 10 starlet scales, json written; eval_log now carries chi2 by S/N bin"
 
 
+def test_degradation_is_brightness_tied_mild_biased_and_exact():
+    from DESIFlow.training.data import degrade_inputs, object_snr
+    rng = np.random.default_rng(0)
+    B, N = 64, 4000
+    q_true = np.repeat([0.5, 1.0, 3.0, 10.0, 30.0, 100.0, 10.0, 30.0], 8)               # per-pixel S/N of each object (8 objects per level)
+    ivar = np.ones((B, N), np.float32) * 4.0
+    flux = (q_true[:, None] / 2.0 * np.ones((B, N))).astype(np.float32)                 # flux * sqrt(ivar) = q
+    mask = np.zeros((B, N), np.float32)
+    mask[:, 100:140] = 1.0                                                              # some bad pixels
+    f_in, iv_in, g, q = degrade_inputs(flux, ivar, mask, rng, q_floor=1.0, power=2.0)
+    assert np.allclose(q, q_true, rtol=1e-3)
+    assert (g[q_true <= 1.0] == 1.0).all(), "objects at or below q_floor must not be degraded"
+    assert np.array_equal(f_in[q_true <= 1.0], flux[q_true <= 1.0]) and np.array_equal(iv_in[q_true <= 1.0], ivar[q_true <= 1.0])
+    assert (g <= np.maximum(q_true, 1.0) + 1e-5).all() and (g >= 1.0).all(), "g is bounded by q / q_floor"
+    assert np.array_equal(f_in[:, 100:140], flux[:, 100:140]) and np.array_equal(iv_in[:, 100:140], ivar[:, 100:140]), "bad pixels untouched"
+    ok = mask == 0
+    added = ((f_in - flux) ** 2 * ivar)[ok.nonzero()[0], ok.nonzero()[1]]                # (added noise / original sigma)^2, expectation g^2 - 1
+    per_obj = np.array([((f_in[i] - flux[i]) ** 2 * ivar[i])[ok[i]].mean() for i in range(B)])
+    big = g > 1.5
+    assert np.allclose(per_obj[big], g[big] ** 2 - 1, rtol=0.35), (per_obj[big][:5], (g[big] ** 2 - 1)[:5])   # donor pattern modulates, mean follows g^2 - 1
+    assert np.allclose(1.0 / iv_in[ok] - 1.0 / ivar[ok] >= -1e-6, True) and (iv_in[ok] <= ivar[ok] + 1e-6).all(), "input ivar is the combined (never larger) ivar"
+    gs = np.concatenate([degrade_inputs(flux, ivar, mask, np.random.default_rng(k), 1.0, 2.0)[2][-8:] for k in range(300)])    # the S/N-30 objects
+    gmax = 30.0
+    assert 0.65 < np.mean(gs < np.sqrt(gmax)) < 0.78, "u**2 skew: ~71% of draws below sqrt(g_max)"
+    return (f"q <= 1 untouched; g <= q/q_floor; bad pixels untouched; added noise variance = g^2 - 1 (within the donor-pattern scatter); input ivar = combined; "
+            f"{100 * np.mean(gs < np.sqrt(gmax)):.0f}% of an S/N-30 object's draws are below sqrt(g_max)")
+
+
+def test_z_log_loss_has_floor_and_growing_gradient():
+    from DESIFlow.training.zhead import ZHead
+    eps = 1000.0 / 299792.458
+    z = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float64)
+    d = torch.tensor([0.0, 0.04, 0.0004], dtype=torch.float64)
+    pred = (torch.log1p(z) + d).requires_grad_(True)
+    ZHead.log_loss(pred, z, None, eps).backward()
+    g = pred.grad * 3
+    assert torch.allclose(g, d / (d ** 2 + eps ** 2), rtol=1e-6), (g, d / (d ** 2 + eps ** 2))
+    assert g[1] > 20 * 2 * 0.04, "far above the floor the gradient (~1/D) is far larger than MSE's 2D"
+    l0 = 0.5 * np.log(eps ** 2)
+    assert abs(ZHead.log_loss(torch.log1p(z), z, None, eps).item() - l0) < 1e-9, "loss at D = 0 is log(eps)"
+    assert ZHead.log_loss(pred.detach(), z, torch.zeros(3, dtype=torch.bool), eps) is None
+    return f"L = 1/2 log(D^2 + eps^2), eps = {eps:.2e} (1000 km/s): gradient D/(D^2+eps^2), {g[1].item() / (2 * 0.04):.0f}x MSE's at D = 4%, zero at D = 0, loss floor log(eps)"
+
+
+def test_e_statistics_logged_and_run_uses_new_defaults():
+    out = TMP / "run"
+    ev = [json.loads(l) for l in (out / "eval_log.jsonl").read_text().splitlines()]
+    tr = [json.loads(l) for l in (out / "train_log.jsonl").read_text().splitlines()]
+    assert len(ev[-1]["E_by_scale"]) == 10 and np.isfinite(ev[-1]["E_by_scale"]).all() and len(ev[-1]["E1_by_snr"]) >= 1 and np.isfinite(ev[-1]["val_z_loss"])
+    assert all(np.isfinite(t["g_mean"]) and t["g_mean"] >= 1 and 0 <= t["z_cap"] <= 1 for t in tr)
+    cfg = json.load(open(out / "config.json"))["args"]
+    assert cfg["huber"] == 0.0 and cfg["mask_frac_max"] == 0.75 and cfg["degrade"] is True and cfg["z_loss"] == "log" and cfg["z_grad_cap"] is True
+    return (f"eval log carries E_by_scale (10 scales), E1_by_snr ({len(ev[-1]['E1_by_snr'])} bins) and val_z_loss; train log carries mean degradation g "
+            f"({tr[-1]['g_mean']:.2f}) and the z-cap scale; defaults: plain chi2, masks 5-75%, degradation on, log z loss, z cap on")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

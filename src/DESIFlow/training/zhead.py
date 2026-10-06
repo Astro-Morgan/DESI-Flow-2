@@ -27,6 +27,16 @@ class ZHead(nn.Module):
         return self.lin(content).squeeze(-1).mean(-1)
 
     @staticmethod
+    def log_loss(pred, z, z_mask=None, eps=1000.0 / 299792.458):
+        """Mean of 1/2 log(Delta^2 + eps^2) over the trusted spectra, Delta = pred - log1p(z) (= (z_pred - z)/(1+z) to first order; a velocity dv is
+        Delta = dv/c). Equal reward for every halving of the error until the floor eps (default 1000 km/s, DESI's standard precision cut); the gradient
+        Delta/(Delta^2 + eps^2) GROWS as the error shrinks toward eps, unlike MSE. None if there is no trusted redshift."""
+        err = 0.5 * torch.log((pred - torch.log1p(z)) ** 2 + eps ** 2)
+        if z_mask is None:
+            return err.mean()
+        return (err * z_mask).sum() / z_mask.sum() if z_mask.any() else None
+
+    @staticmethod
     def loss(pred, z, z_mask=None):
         """MSE in log1p(z) over the trusted spectra; None if there are none in the batch."""
         err = (pred - torch.log1p(z)) ** 2

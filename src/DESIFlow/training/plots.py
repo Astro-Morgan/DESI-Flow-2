@@ -6,6 +6,8 @@ curves.png  (every evaluation)
            catastrophic fraction vs step
     row 2: masked reconstruction (hidden-pixel chi2, train and validation) | total reconstruction (all good pixels: train and validation from the
            masked input, validation from the UNMASKED input) | gradient norm, cos(g_rec, g_z)
+    row 3: E_1 by S/N bin vs step (ivar calibration: 1 = quoted noise is right) | E_j per starlet scale (validation, denoised output; 1 = noise) |
+           training aids: |g_z|/|g_rec|, the z-gradient cap, mean noise-degradation factor g
 recon/step_XXXXXXX.png  five fixed validation spectra across the redshift range: 8-pixel data bins, the model with nothing hidden (blue), and
     the reconstruction of the hidden spans (red) from the masked input; below each, the residual in units of its noise.
 """
@@ -40,13 +42,14 @@ def plot_curves(out_dir):
     st = np.array([r["step"] for r in tr])
     es = np.array([e["step"] for e in ev])
     col = lambda rows, k: np.array([r.get(k, np.nan) for r in rows], float)
-    fig, ax = plt.subplots(2, 3, figsize=(17, 9))
+    fig, ax = plt.subplots(3, 3, figsize=(17, 13.5))
     a = ax[0, 0]
     if "z_loss" in tr[0]:
-        a.plot(st, _smooth(col(tr, "z_loss")), color="tab:blue", label="train MSE(log1p z)")
-        if ev and "z_rmse_log1p" in ev[0]:
-            a.plot(es, col(ev, "z_rmse_log1p") ** 2, "o-", color="tab:red", label="validation (RMSE^2)")
-        a.set_yscale("log"); a.legend(); a.set_title("redshift loss"); a.set_xlabel("step")
+        a.plot(st, _smooth(col(tr, "z_loss")), color="tab:blue", label="train")
+        if ev and "val_z_loss" in ev[0]:
+            a.plot(es, col(ev, "val_z_loss"), "o-", color="tab:red", label="validation")
+        a.legend(); a.set_title("redshift loss (1/2 log(D^2+eps^2), D = log1p z_pred - log1p z; MSE if --z-loss mse)"); a.set_xlabel("step")
+        a.title.set_fontsize(8)
     a = ax[0, 1]
     sc = out / "z_scatter_latest.npz"
     if sc.exists():
@@ -81,6 +84,34 @@ def plot_curves(out_dir):
         a2.plot(st, _smooth(col(tr, "cos"), 15), color="tab:orange", lw=0.8, label="cos(g_rec, g_z)")
         a2.axhline(0, color="0.7", lw=0.5); a2.set_ylabel("cos")
     a.set_title("optimization")
+    a = ax[2, 0]
+    if ev and "E1_by_snr" in ev[0]:
+        keys = sorted({k for e in ev for k in e.get("E1_by_snr", {})}, key=lambda k: float(k.split("-")[0]))
+        for k in keys:
+            a.plot(es, [e.get("E1_by_snr", {}).get(k, np.nan) for e in ev], "o-", label=f"S/N {k}")
+        a.axhline(1, color="0.5", lw=0.7); a.set_yscale("log"); a.legend(fontsize=7); a.set_xlabel("step")
+        a.set_title("E_1 by S/N bin: residual power at the finest scale / pure noise (1 = ivar right)")
+        a.title.set_fontsize(8)
+    a = ax[2, 1]
+    if ev and "E_by_scale" in ev[0]:
+        j = np.arange(1, len(ev[-1]["E_by_scale"]) + 1)
+        for e, alpha in ((ev[0], 0.35), (ev[-1], 1.0)):
+            a.plot(j, e["E_by_scale"], "o-", alpha=alpha, label=f"step {e['step']}")
+        a.axhline(1, color="0.5", lw=0.7); a.set_yscale("log"); a.legend(fontsize=8)
+        a.set_xticks(j); a.set_xticklabels([f"s{k}" for k in j[:-1]] + ["c"])
+        a.set_xlabel("starlet scale (width ~ 23 * 2^j km/s)"); a.set_title("E_j: residual power / pure noise per scale (validation, median)")
+        a.title.set_fontsize(8)
+    a = ax[2, 2]
+    if "norm_z" in tr[0]:
+        a.plot(st, _smooth(col(tr, "norm_z") / col(tr, "norm_rec")), color="tab:green", label="|g_z| / |g_rec| (before cap)")
+        a.set_yscale("log")
+        if "z_cap" in tr[0]:
+            a.plot(st, _smooth(col(tr, "z_cap")), color="tab:red", label="z-gradient cap scale (1 = not binding)")
+    if "g_mean" in tr[0]:
+        a2 = a.twinx()
+        a2.plot(st, _smooth(col(tr, "g_mean")), color="tab:purple", lw=0.8, label="mean degradation g")
+        a2.set_ylabel("mean g (noise inflation)", fontsize=8); a2.legend(fontsize=7, loc="center right")
+    a.legend(fontsize=7, loc="upper left"); a.set_xlabel("step"); a.set_title("training aids")
     fig.tight_layout()
     fig.savefig(out / "curves.png", dpi=110)
     plt.close(fig)

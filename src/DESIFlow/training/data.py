@@ -63,6 +63,57 @@ def degrade_inputs(flux, ivar, mask, rng, q_floor=1.0, power=2.0, shape_clip=10.
     return flux_in, ivar_in, g.astype(np.float32), q.astype(np.float32)
 
 
+def lsf_kernels(sig_px, K):
+    """(B, 2K+1) normalised Gaussian kernels on integer pixel offsets whose VARIANCE equals sig_px**2 (B,) exactly: a Gaussian sampled at integer offsets under-broadens below ~0.7 px
+    (at sigma 0.25 px its variance is ~0), so the width of the sampled Gaussian is solved for the target variance. sig_px = 0 -> a delta."""
+    j = np.arange(-K, K + 1)
+    grid = np.linspace(0.05, 4.0, 400)
+    kg = np.exp(-0.5 * (j[None, :] / grid[:, None]) ** 2)
+    var_grid = (kg * j[None, :] ** 2).sum(1) / kg.sum(1)
+    s_eff = np.where(sig_px > 0, np.interp(np.asarray(sig_px) ** 2, var_grid, grid), 1e-6)
+    k = np.exp(-0.5 * (j[None, :] / s_eff[:, None]) ** 2)
+    return k / k.sum(1, keepdims=True)
+
+
+def broaden_lsf(flux, ivar, mask, rng, sigma_max=0.6, prob=0.5, pix=0.8, min_cov=0.6):
+    """LSF augmentation: re-observe the spectra as an instrument with a WIDER line spread function. Arrays (B, N) float32 -> (flux, ivar, mask, sigma (B,)).
+    A fraction `prob` of the objects get an extra Gaussian of sigma ~ U(0, sigma_max) Angstrom (constant in wavelength = in native pixels, like the DESI LSF: R 2000 -> 5500 is
+    ~0.76 A everywhere; Gaussian line widths add in quadrature, so it can only broaden, never sharpen). Applied to the data BEFORE masking and noise degradation, so the model INPUT and
+    the loss TARGET are the same broadened spectrum (the model learns to reconstruct whatever width it sees, not to deconvolve).
+    Pixel rule: kernel-weighted mean over the GOOD pixels in reach, variance sum(w^2 var)/(sum w)^2 (neighbouring outputs become correlated, which the pipeline ignores, as it
+    does for the resampled grid); an output pixel stays good only if it was good AND the good kernel weight covers >= min_cov (bad pixels are never filled in)."""
+    B, N = flux.shape
+    sig = rng.random(B) * sigma_max * (rng.random(B) < prob)
+    if not (sig > 0).any():
+        return flux, ivar, mask, sig.astype(np.float32)
+    K = max(int(np.ceil(4 * sigma_max / pix)), 1)
+    j = np.arange(-K, K + 1)
+    k = lsf_kernels(sig / pix, K)                                                    # (B, 2K+1); sigma = 0 -> a delta
+    good = (mask == 0) & (ivar > 0)
+    var = np.where(good, 1.0 / np.maximum(ivar, 1e-30), 0.0)
+
+    def shift(a, d):                                                                 # out[:, i] = a[:, i + d], zero outside
+        out = np.zeros_like(a)
+        if d >= 0:
+            out[:, :N - d] = a[:, d:]
+        else:
+            out[:, -d:] = a[:, :N + d]
+        return out
+
+    sw, swf, sw2v = np.zeros((B, N)), np.zeros((B, N)), np.zeros((B, N))
+    for t, d in enumerate(j):
+        w = k[:, t:t + 1] * shift(good.astype(np.float64), d)
+        sw += w
+        swf += w * shift(flux.astype(np.float64), d)
+        sw2v += w * w * shift(var, d)
+    keep = good & (sw >= min_cov)
+    f_new = np.where(keep, swf / np.maximum(sw, 1e-30), 0.0)
+    iv_new = np.where(keep, sw * sw / np.maximum(sw2v, 1e-300), 0.0)
+    m_new = np.where(good & ~keep, 1.0, mask)
+    on = (sig > 0)[:, None]
+    return (np.where(on, f_new, flux).astype(np.float32), np.where(on, iv_new, ivar).astype(np.float32), np.where(on, m_new, mask).astype(np.float32), sig.astype(np.float32))
+
+
 class PretrainData:
     def __init__(self, data_dir, group_file=None):
         d = Path(data_dir)
@@ -119,8 +170,9 @@ class PretrainData:
 class StepBatches(torch.utils.data.Dataset):
     """dataset[step] -> the training batch for that step (dict of numpy arrays; use DataLoader(batch_size=None))."""
 
-    def __init__(self, data, train_idx, batch, seed, masker=None, degrade=False, q_floor=1.0, degrade_power=2.0):
+    def __init__(self, data, train_idx, batch, seed, masker=None, degrade=False, q_floor=1.0, degrade_power=2.0, lsf_aug=0.0, lsf_prob=0.5):
         self.data, self.train_idx, self.batch, self.seed = data, np.asarray(train_idx), batch, seed
+        self.lsf_aug, self.lsf_prob = lsf_aug, lsf_prob                    # LSF augmentation (see broaden_lsf): extra sigma up to lsf_aug Angstrom for a fraction lsf_prob; 0 = off
         self.masker = masker or SpanMasker()
         self.degrade, self.q_floor, self.degrade_power = degrade, q_floor, degrade_power
         self.steps_per_epoch = len(self.train_idx) // batch
@@ -141,6 +193,9 @@ class StepBatches(torch.utils.data.Dataset):
     def __getitem__(self, step):
         idx = self.indices(step)
         flux, ivar, mask = self.data.read(idx)
+        lsf = None
+        if self.lsf_aug > 0:
+            flux, ivar, mask, lsf = broaden_lsf(flux, ivar, mask, np.random.default_rng([self.seed, 37, int(step)]), self.lsf_aug, self.lsf_prob)
         good = (mask == 0) & (ivar > 0)
         hidden, _ = self.masker.sample(good, np.random.default_rng([self.seed, 23, int(step)]))
         z_ok = self.data.trusted(idx)
@@ -148,5 +203,8 @@ class StepBatches(torch.utils.data.Dataset):
             flux_in, ivar_in, g, q = degrade_inputs(flux, ivar, mask, np.random.default_rng([self.seed, 29, int(step)]), self.q_floor, self.degrade_power)
         else:
             flux_in, ivar_in, g, q = flux, ivar, np.ones(len(flux), np.float32), object_snr(flux, ivar, mask).astype(np.float32)
-        return {"flux": flux, "ivar": ivar, "flux_in": flux_in, "ivar_in": ivar_in, "g": g, "q": q, "mask": mask,
-                "z": np.where(z_ok, self.data.z[idx], 0.0).astype(np.float32), "z_ok": z_ok, "hidden": hidden, "idx": idx}
+        out = {"flux": flux, "ivar": ivar, "flux_in": flux_in, "ivar_in": ivar_in, "g": g, "q": q, "mask": mask,
+               "z": np.where(z_ok, self.data.z[idx], 0.0).astype(np.float32), "z_ok": z_ok, "hidden": hidden, "idx": idx}
+        if lsf is not None:
+            out["lsf_sigma"] = lsf
+        return out

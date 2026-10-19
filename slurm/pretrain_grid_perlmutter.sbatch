@@ -1,6 +1,8 @@
 #!/bin/bash
 # GRID Eidos pretraining on one Perlmutter GPU node (1 GPU). Edit the account and paths, then:  sbatch slurm/pretrain_grid_perlmutter.sbatch
-# Quick check first:  sbatch -q debug -t 00:30:00 --export=ALL,STEPS=200,EVAL_EVERY=100,GATE_MIN=50 slurm/pretrain_grid_perlmutter.sbatch
+# Quick check first (the account of a GPU job ends in _g; ENV_CMD has no commas; every default below can be overridden through --export):
+#   sbatch -A desi_g -q debug -t 00:30:00 --export=ALL,ENV_CMD="module load pytorch/2.11.0",STEPS=200,EVAL_EVERY=100,GATE_MIN=50,GATE_FORCE=150 slurm/pretrain_grid_perlmutter.sbatch
+# The job log is  eidos_grid_<jobid>.out  in the directory you ran sbatch from (sacct -j JOBID -X --format=JobID,WorkDir%100 shows it).
 # Resubmitting the same script continues from RUN_DIR/last.pt (--resume), so a chain of jobs trains through the walltime limit.
 # The step-based schedules below are the B=128 values of the benchmark (ramp 1000-2000 steps = 128k-256k objects); scale them with the batch size.
 #SBATCH -A CHANGE_ME_g            # your GPU allocation (name usually ends in _g)
@@ -26,11 +28,17 @@ POS=${POS:-cbias}                                                 # cbias (defau
 GATE_MIN=${GATE_MIN:-250}
 GATE_FORCE=${GATE_FORCE:-8000}                                    # open the decoder z feed at this step even if the classifier never reaches sigma_NMAD 0.0014 (real spectra: median S/N 1.8)
 
-# module load pytorch            # NERSC's PyTorch module (check `module avail pytorch`), or: source activate your_env
+ENV_CMD=${ENV_CMD:-}             # how to get the PyTorch environment, e.g. --export=ALL,ENV_CMD="module load pytorch/2.11.0"  (no commas) or ENV_CMD="source activate myenv"
+if [ -n "$ENV_CMD" ]; then eval "$ENV_CMD"; fi
 export PYTHONPATH=$REPO/src:$PYTHONPATH
 export OMP_NUM_THREADS=4
 mkdir -p "$OUT"
 cd "$REPO"
+echo "job $SLURM_JOB_ID on $(hostname) | repo $REPO | data $DATA | out $OUT | pos $POS batch $BATCH accum $ACCUM steps $STEPS"
+python -c "import sys, torch; print('python', sys.executable); print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')" \
+    || { echo "ERROR: cannot import torch; pass the environment with --export=ALL,ENV_CMD=\"module load pytorch/...\""; exit 2; }
+python -c "import DESIFlow.training.pretrain_grid" || { echo "ERROR: cannot import DESIFlow from $REPO/src (submit from the repo root or set REPO=...)"; exit 3; }
+for f in flux ivar mask z; do [ -f "$DATA/$f.npy" ] || { echo "ERROR: $DATA/$f.npy not found"; exit 4; }; done
 
 srun python -u -m DESIFlow.training.pretrain_grid \
     --data-dir "$DATA" --out "$OUT" --resume \

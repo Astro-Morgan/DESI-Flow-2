@@ -81,3 +81,55 @@ def backward_with_surgery(loss_rec, loss_z, shared, rec_only, z_only, surgery=Tr
     along = 1.0 + (_dot(gz_proj, gr_sh) / nr2).item() if nr > 0 else 1.0
     return {"cos": cos, "conflict": float(cos < 0), "norm_rec": nr, "norm_z": nz, "norm_z_after": nz_after,
             "surgery": float(surgery and cos < 0), "along": along, "z_cap": cap}
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Accumulated / scheduled variant (used by the grid Eidos pretraining): the two raw gradients are computed per MICRO-batch, summed over the micro-batches of a step, and the
+# surgery is applied once to the WHOLE-batch gradients (exactly equal to a single big batch). `both` = the z heads: they receive g_rec (through the decoder's z feed) + g_z.
+
+def route_grads(loss_rec, loss_z, shared, rec_only, both):
+    """The two raw gradients PCGrad needs: g_rec over shared + rec_only + both, g_z over shared + both (None if loss_z is None). Frees the graph."""
+    g_rec = list(torch.autograd.grad(loss_rec, shared + rec_only + both, retain_graph=loss_z is not None, allow_unused=True))
+    g_z = list(torch.autograd.grad(loss_z, shared + both, allow_unused=True)) if loss_z is not None else None
+    return g_rec, g_z
+
+
+def acc_grads(a, b):
+    """elementwise sum of two gradient lists (None = zero); a may be None"""
+    if b is None:
+        return a
+    if a is None:
+        return b
+    return [y if x is None else x if y is None else x + y for x, y in zip(a, b)]
+
+
+def route_apply(g_rec, g_z, shared, rec_only, both, surgery=True, z_cap=True, z_scale=1.0):
+    """PCGrad on (possibly accumulated) batch gradients, as backward_with_surgery, plus a group `both` (the z heads, not shared with anything else) whose gradient is
+    g_rec + g_z without surgery. z_cap: the z gradient on the shared parameters is capped at the reconstruction gradient's norm; z_scale: schedule multiplier on it (the heads'
+    own gradient is not scaled; 0 = the z loss does not reach the encoder). Sets .grad; returns stats (cos, z_cap, along)."""
+    n, m = len(shared), len(rec_only)
+    zeros = lambda p: torch.zeros_like(p)
+    if g_z is None:
+        for p, g in zip(shared + rec_only + both, g_rec):
+            p.grad = zeros(p) if g is None else g
+        return {}
+    gr_sh, gz_sh = list(g_rec[:n]), list(g_z[:n])
+    gz_proj, dot, nr2, nz2 = project_out_conflict(gz_sh, gr_sh) if surgery else (gz_sh, _dot(gz_sh, gr_sh), _dot(gr_sh, gr_sh), _dot(gz_sh, gz_sh))
+    cap = 1.0
+    if z_cap:
+        nza, nra = _dot(gz_proj, gz_proj).sqrt().item(), nr2.sqrt().item()
+        if nza > nra > 0:
+            cap = nra / nza
+            gz_proj = [None if g is None else g * cap for g in gz_proj]
+    if z_scale != 1.0:
+        gz_proj = [None if g is None else g * z_scale for g in gz_proj]
+    for p, gr, gz in zip(shared, gr_sh, gz_proj):
+        gr = zeros(p) if gr is None else gr
+        p.grad = gr if gz is None else gr + gz
+    for p, g in zip(rec_only, g_rec[n:n + m]):
+        p.grad = zeros(p) if g is None else g
+    for p, gr, gz in zip(both, g_rec[n + m:], g_z[n:]):
+        p.grad = (zeros(p) if gr is None else gr) + (zeros(p) if gz is None else gz)
+    nr, nz = nr2.sqrt().item(), nz2.sqrt().item()
+    return {"cos": (dot / (nr2.sqrt() * nz2.sqrt())).item() if nr > 0 and nz > 0 else 0.0, "z_cap": cap,
+            "along": 1.0 + (_dot(gz_proj, gr_sh) / nr2).item() if nr > 0 else 1.0}

@@ -40,3 +40,31 @@ def chi2_stats(pred, scale, flux, ivar, hidden, good):
     nh, nv = hidden.sum().clamp_min(1), vis.sum().clamp_min(1)
     return {"chi2_hidden": (r2 * hidden).sum() / nh, "chi2_visible": (r2 * vis).sum() / nv,
             "n_hidden": hidden.sum(), "n_visible": vis.sum()}
+
+
+def weighted_mse_loss(pred, scale, flux, ivar, valid, hidden=None, hidden_weight=1.0, w_cap=100.0):
+    """ivar-weighted MSE, per object, in normalized flux units (the default pretraining reconstruction loss).
+
+        r_i = flux_i / s - pred_i                                    residual in the encoder's normalized units (pred = flux / s)
+        w_i = ivar_i * (hidden_weight if pixel i is hidden else 1)   on the natively good, scored pixels (valid); 0 elsewhere
+        L_b = sum_i w_i r_i^2 / sum_i w_i                            weighted mean squared residual of object b
+        loss = mean over the objects that have any weight of L_b
+
+    Differs from chi2 (sum ivar r^2 / N), which grows as the object's S/N^2: here each object's loss is divided by its own total weight, so bright and faint
+    objects contribute comparably (the pooled chi2 was dominated by a few bright objects and had heavy-tailed gradients). Pixel weights are capped at w_cap times
+    the object's median weight so that a pathological ivar (DESI occasionally has 1e12) cannot decide its object's loss.
+
+    pred, flux, ivar (B, Q) are the queried pixels (ORIGINAL data); valid (B, Q) bool = natively good pixels that are scored (hidden AND visible ones when the
+    loss is on all pixels); hidden (B, Q) bool marks the artificially hidden ones (None = no pixel is up-weighted). Natively bad pixels have ivar 0 and valid False.
+    """
+    w = ivar.clamp_min(0) * valid.to(ivar.dtype)
+    if w_cap:
+        med = torch.where(valid, w, torch.full_like(w, float("nan"))).nanmedian(dim=1, keepdim=True).values      # NaN for an object without valid pixels (its w is 0 anyway)
+        w = torch.minimum(w, (w_cap * med).nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0))
+    if hidden is not None and hidden_weight != 1.0:
+        w = w * torch.where(hidden, torch.full_like(w, hidden_weight), torch.ones_like(w))
+    r = flux / scale.unsqueeze(-1) - pred
+    tot = w.sum(1)
+    per_obj = (w * r * r).sum(1) / tot.clamp_min(1e-30)
+    has = tot > 0
+    return (per_obj * has).sum() / has.sum().clamp_min(1)

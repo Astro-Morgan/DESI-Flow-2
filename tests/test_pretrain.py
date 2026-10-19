@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from DESIFlow.eidos.eidos import Eidos
 from DESIFlow.eidos.reader import velocity
 from DESIFlow.training.data import PretrainData, StepBatches
-from DESIFlow.training.loss import hidden_loss
+from DESIFlow.training.loss import hidden_loss, weighted_mse_loss
 from DESIFlow.training.masking import apply_hidden, N_PIX
 from DESIFlow.training import pretrain
 from DESIFlow.training.pretrain import gather_hidden_queries, SMALL
@@ -90,6 +90,58 @@ def test_hidden_only_queries_equal_full_decode():
     return f"decoding only the hidden pixels (Q={qi.shape[1]} of {N_PIX}, padded) gives the same loss as decoding all pixels: {part.item():.4f} vs {full.item():.4f}"
 
 
+def test_weighted_mse_loss_definition():
+    torch.manual_seed(0)
+    B, Q = 5, 60
+    flux = torch.randn(B, Q) + 3
+    ivar = torch.rand(B, Q) * 5 + 0.1
+    valid = torch.rand(B, Q) > 0.25
+    hid = torch.rand(B, Q) > 0.6
+    s = torch.tensor([1., 2., 3., 4., 5.])
+    pred = flux / s[:, None] + 0.1 * torch.randn(B, Q)
+    loss = weighted_mse_loss(pred, s, flux, ivar, valid, hid, 1.0, 0.0)
+    ref = 0.0
+    for b in range(B):                                                                          # per object: sum w r^2 / sum w, w = ivar on the valid pixels
+        w, r = ivar[b] * valid[b], flux[b] / s[b] - pred[b]
+        ref += (w * r * r).sum() / w.sum()
+    assert abs(loss.item() - ref.item() / B) < 1e-6
+    assert abs(weighted_mse_loss(pred, s, flux, ivar * 1e3, valid, hid, 1.0, 0.0).item() - loss.item()) < 1e-6, "invariant to the overall ivar scale"
+    bad = valid.clone(); bad[:, 7] = False                                                      # a natively bad pixel never matters, whatever its values
+    f2, p2, iv2 = flux.clone(), pred.clone(), ivar.clone()
+    f2[:, 7], p2[:, 7], iv2[:, 7] = 1e6, -1e6, 1e12
+    assert abs(weighted_mse_loss(p2, s, f2, iv2, bad, hid, 1.0, 100.0).item() - weighted_mse_loss(pred, s, flux, ivar, bad, hid, 1.0, 100.0).item()) < 1e-6
+    spike = ivar.clone(); spike[0, 3] = 1e12; vv = valid.clone(); vv[0, 3] = True              # a pathological ivar on a valid pixel
+    r_spike = ((flux[0, 3] / s[0] - pred[0, 3]) ** 2).item()
+    one = lambda cap: weighted_mse_loss(pred[:1], s[:1], flux[:1], spike[:1], vv[:1], hid[:1], 1.0, cap).item()
+    assert abs(one(0.0) - r_spike) < 1e-3 * r_spike + 1e-9, "uncapped, that single pixel IS the object's loss"
+    assert abs(one(100.0) - r_spike) > 0.05 * abs(r_spike - loss.item()), "capped at 100x the object's median weight it no longer decides it"
+    hw = weighted_mse_loss(pred, s, flux, ivar, valid, hid, 5.0, 0.0)
+    assert hw != loss, "hidden_weight changes the weighting"
+    none = weighted_mse_loss(pred, s, flux, ivar, torch.zeros(B, Q, dtype=torch.bool), hid, 1.0, 100.0)
+    assert none.item() == 0.0 and torch.isfinite(none), "no valid pixel anywhere -> 0, not NaN"
+    return (f"per-object weighted mean of squared normalized residuals matches the hand computation ({loss.item():.5f}); invariant to the ivar scale; "
+            f"natively bad pixels ignored; a 1e12 ivar capped; empty batch -> 0")
+
+
+def test_all_pixel_queries_equal_full_decode():
+    torch.manual_seed(0)
+    net = Eidos(**SMALL).eval()
+    d = PretrainData(DATA)
+    b = StepBatches(d, np.arange(N), 4, seed=0)[0]
+    flux, ivar, mask, hid = (torch.tensor(b[k]) for k in ("flux", "ivar", "mask", "hidden"))
+    good = (mask == 0) & (ivar > 0)
+    qv = velocity(torch.linspace(3600., 9824., N_PIX, dtype=torch.float64), net.wave0)
+    with torch.no_grad():
+        lat = net.encode(apply_hidden(torch.stack([flux, ivar, mask], 1), hid))
+        s = 10 ** lat[:, 0, 0]
+        full = weighted_mse_loss(net.decoder(lat[:, 1:], qv), s, flux, ivar, good, hid, 1.0, 100.0)
+        qi, qw = gather_hidden_queries(good)
+        part = weighted_mse_loss(net.decoder(lat[:, 1:], qv[qi]), s, flux.gather(1, qi), ivar.gather(1, qi), qw, hid.gather(1, qi), 1.0, 100.0)
+    assert qw.sum() == good.sum()
+    assert abs(full.item() - part.item()) < 1e-4 * abs(full.item()), (full.item(), part.item())
+    return f"decoding every good pixel through the gathered (padded) queries (Q={qi.shape[1]}) gives the same weighted MSE as the full decode: {part.item():.5f} vs {full.item():.5f}"
+
+
 def test_end_to_end_run_resume_and_outputs():
     out = TMP / "run"
     common = ["--data-dir", str(DATA), "--out", str(out), "--model", "small", "--batch", "4", "--val-n", "8", "--test-n", "8", "--workers", "0",
@@ -103,17 +155,17 @@ def test_end_to_end_run_resume_and_outputs():
     ev = [json.loads(l) for l in (out / "eval_log.jsonl").read_text().splitlines()]
     tr = [json.loads(l) for l in (out / "train_log.jsonl").read_text().splitlines()]
     assert [e["step"] for e in ev] == [4, 8] and [t["step"] for t in tr] == [2, 4, 6, 8]
-    for k in ("val_masked_chi2", "val_total_chi2", "val_unmasked_chi2", "z_rmse_log1p", "z_sigma_nmad", "z_cat_frac"):
+    for k in ("val_wmse", "val_unmasked_wmse", "val_masked_chi2", "val_total_chi2", "val_unmasked_chi2", "z_rmse_log1p", "z_sigma_nmad", "z_cat_frac"):
         assert np.isfinite(ev[-1][k]), k
     for k in ("chi2_hidden", "chi2_total", "z_loss", "grad_norm", "cos", "along"):
         assert np.isfinite(tr[-1][k]), k
     assert all(t["along"] >= 1 - 1e-6 for t in tr), "PCGrad keeps at least the reconstruction-only progress"
     ck = torch.load(out / "best.pt", weights_only=False)
-    assert ck["metric"] == min(e["val_masked_chi2"] for e in ev)
+    assert ck["metric"] == min(e["val_wmse"] for e in ev) and ck["select"] == "val_wmse"
     pretrain.main(common + ["--steps", "12", "--resume"])
     tr2 = [json.loads(l) for l in (out / "train_log.jsonl").read_text().splitlines()]
     assert [t["step"] for t in tr2] == [2, 4, 6, 8, 10, 12], "resume must continue the logs from step 8"
-    return (f"8 steps then --resume to 12: logs continue at step 8, best.pt holds the best validation hidden-pixel chi2 ({ck['metric']:.3f}), "
+    return (f"8 steps then --resume to 12: logs continue at step 8, best.pt holds the best validation wmse ({ck['metric']:.4f}), "
             f"figures and checkpoints written; PCGrad progress kept >= 1 in every logged window")
 
 
@@ -201,9 +253,10 @@ def test_e_statistics_logged_and_run_uses_new_defaults():
     assert len(ev[-1]["E_by_scale"]) == 10 and np.isfinite(ev[-1]["E_by_scale"]).all() and len(ev[-1]["E1_by_snr"]) >= 1 and np.isfinite(ev[-1]["val_z_loss"])
     assert all(np.isfinite(t["g_mean"]) and t["g_mean"] >= 1 and 0 <= t["z_cap"] <= 1 for t in tr)
     cfg = json.load(open(out / "config.json"))["args"]
+    assert cfg["rec_loss"] == "wmse" and cfg["loss_pixels"] == "all" and cfg["hidden_weight"] == 1.0 and cfg["select"] == "wmse"
     assert cfg["huber"] == 0.0 and cfg["mask_frac_max"] == 0.75 and cfg["degrade"] is True and cfg["z_loss"] == "log" and cfg["z_grad_cap"] is True
     return (f"eval log carries E_by_scale (10 scales), E1_by_snr ({len(ev[-1]['E1_by_snr'])} bins) and val_z_loss; train log carries mean degradation g "
-            f"({tr[-1]['g_mean']:.2f}) and the z-cap scale; defaults: plain chi2, masks 5-75%, degradation on, log z loss, z cap on")
+            f"({tr[-1]['g_mean']:.2f}) and the z-cap scale; defaults: ivar-weighted MSE on all pixels, masks 5-75%, degradation on, log z loss, z cap on")
 
 
 if __name__ == "__main__":

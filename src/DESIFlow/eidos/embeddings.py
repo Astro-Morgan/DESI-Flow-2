@@ -22,8 +22,9 @@ import torch.nn as nn
 class ScaleToken(nn.Module):
     def __init__(self, d_token: int, n_freqs: int = 16, min_period: float = 0.05, max_period: float = 20.):
         super().__init__()
-        if d_token < 2 * n_freqs + 2:
-            raise ValueError(f"d_token={d_token} < 2*n_freqs+2={2 * n_freqs + 2}")
+        if d_token < 4:
+            raise ValueError(f"d_token={d_token} < 4")
+        n_freqs = min(n_freqs, (d_token - 2) // 2)                                  # narrow latents (d_token < 34) get fewer sinusoids; x itself is always slot 0
         self.d_token = d_token
         periods = torch.logspace(math.log10(min_period), math.log10(max_period), n_freqs)
         self.register_buffer("omega", 2 * math.pi / periods)

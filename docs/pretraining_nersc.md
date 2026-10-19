@@ -3,6 +3,11 @@
 Entry point: `python -m DESIFlow.training.pretrain` (source: `src/DESIFlow/training/pretrain.py`). Single GPU. Masked denoising of native-grid
 spectra plus a linear redshift head trained with PCGrad (the head's gradient is projected off wherever it opposes reconstruction).
 
+**Version-3 choices (2026-10-07, see memory `narrow-feature-benchmark`):** the reconstruction loss is now the **ivar-weighted MSE per object in normalized flux units on ALL natively good
+pixels, hidden and visible** (natively masked pixels, `mask != 0` or `ivar <= 0`, are excluded; `--rec-loss wmse --loss-pixels all`; `--rec-loss chi2 --loss-pixels hidden --huber 5` reproduces the earlier
+runs; `--hidden-weight` up-weights the hidden pixels, `--w-cap` caps a pixel's weight at 100x its object's median). `best.pt` is selected on `val_wmse` (the training objective on the validation set,
+masked input) by default (`--select`). The latent size is unchanged (64 x 256). The other v2 settings (masks 5-75%, degradation, log z loss + cap) are unchanged.
+
 ## Data
 
 A directory with four row-matched arrays on the native DESI grid (`coadd_cameras` output, 3600-9824 A, 0.8 A, 7781 pixels), C-order:
@@ -51,7 +56,7 @@ chi2 values are mean (flux - s*model)^2 * ivar per pixel: 1 = noise. "Masked rec
 
 ## Memory and speed (estimates from a laptop RTX 4090; check the printed numbers)
 
-Batch 16 used 5.0 GB and ran 33-38 samples/s on the laptop, so batch 64 should need about 20 GB (batch 128 ~40 GB: too tight on a 40 GB A100).
+Batch 16 used 5.0 GB and ran 33-38 samples/s on the laptop with the hidden-only loss; with the all-pixel loss it peaks at 7.1 GB (same speed), so batch 64 should need about 28 GB (batch 128 will not fit a 40 GB A100).
 The log prints samples/s, GPU peak memory and `data wait` (ms per step spent waiting for the loader; if it is not near zero, raise `--workers`).
 
 ## Cloning and running on NERSC

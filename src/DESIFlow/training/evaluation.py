@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from DESIFlow.eidos.starlet import RawStarletPath
 from DESIFlow.training.masking import SpanMasker, apply_hidden, N_PIX
-from DESIFlow.training.loss import hidden_loss
+from DESIFlow.training.loss import hidden_loss, weighted_mse_loss
 from DESIFlow.training.scales import scale_excess
 
 Z_BINS = [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 100.0]
@@ -67,12 +67,15 @@ class Evaluator:
             s = 10 ** lat[:, 0, 0]
             pred = model.decoder(lat[:, 1:], qv)
             r2 = (flux - s.unsqueeze(-1) * pred) ** 2 * ivar
+            per["wmse"].append(weighted_mse_loss(pred, s, flux, ivar, good, hid, 1.0, 100.0).expand(len(x)))        # the default training objective on the validation set
             per["hid_r2"].append((r2 * hid).sum(1)); per["hid_n"].append(hid.sum(1))
             per["good_r2"].append((r2 * good).sum(1)); per["good_n"].append(good.sum(1))
             per["huber"].append(hidden_loss(pred, s, flux, ivar, hid, self.huber_c).expand(len(x)) * hid.sum(1))
             lat_u = model.encode(x)
             s_u = 10 ** lat_u[:, 0, 0]
-            res = flux - s_u.unsqueeze(-1) * model.decoder(lat_u[:, 1:], qv)
+            pred_u = model.decoder(lat_u[:, 1:], qv)
+            per["wmse_u"].append(weighted_mse_loss(pred_u, s_u, flux, ivar, good, None, 1.0, 100.0).expand(len(x)))
+            res = flux - s_u.unsqueeze(-1) * pred_u
             excess.append(scale_excess(model.preprocessor, self.starlet, res, ivar, mask, gen=gen).cpu())
             per["unm_r2"].append((res ** 2 * ivar * good).sum(1))
             w8 = (ivar * good)[:, :7776].reshape(len(x), -1, 8)
@@ -84,7 +87,7 @@ class Evaluator:
         cat = {k: torch.cat(v).double().cpu().numpy() for k, v in per.items()}
         z = self.z.cpu().numpy().astype(np.float64)
         zb = np.digitize(z, Z_BINS) - 1
-        out = {"val_masked_chi2": cat["hid_r2"].sum() / cat["hid_n"].sum(), "val_masked_huber": cat["huber"].sum() / cat["hid_n"].sum(),
+        out = {"val_wmse": cat["wmse"].mean(), "val_unmasked_wmse": cat["wmse_u"].mean(), "val_masked_chi2": cat["hid_r2"].sum() / cat["hid_n"].sum(), "val_masked_huber": cat["huber"].sum() / cat["hid_n"].sum(),
                "val_total_chi2": cat["good_r2"].sum() / cat["good_n"].sum(), "val_unmasked_chi2": cat["unm_r2"].sum() / cat["good_n"].sum(),
                "val_unmasked_bin8": cat["bin_chi"].sum() / cat["bin_n"].sum(), "val_hidden_fraction": cat["hid_n"].sum() / cat["good_n"].sum()}
         out["masked_chi2_by_z"] = {f"{Z_BINS[k]:g}-{Z_BINS[k + 1]:g}": float(cat["hid_r2"][zb == k].sum() / max(cat["hid_n"][zb == k].sum(), 1)) for k in range(len(Z_BINS) - 1) if (zb == k).any()}

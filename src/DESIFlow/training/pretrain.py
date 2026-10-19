@@ -23,7 +23,7 @@ from DESIFlow.eidos.eidos import Eidos
 from DESIFlow.eidos.reader import velocity
 from DESIFlow.training.data import PretrainData, StepBatches
 from DESIFlow.training.evaluation import Evaluator
-from DESIFlow.training.loss import hidden_loss
+from DESIFlow.training.loss import hidden_loss, weighted_mse_loss
 from DESIFlow.training.masking import SpanMasker, apply_hidden, N_PIX
 from DESIFlow.training.pcgrad import backward_with_surgery
 from DESIFlow.training.plots import plot_curves, plot_reconstructions
@@ -32,7 +32,7 @@ from DESIFlow.training.zhead import ZHead
 SMALL = dict(cnn_kwargs=dict(branch_channels=8, mix_channels=32, down_channels=(32, 64, 64, 64), d_token=64),
              perceiver_kwargs=dict(n_latents=16, d_latent=64, n_heads=2, n_cross=2),
              decoder_kwargs=dict(d_query=64, n_heads=2))
-SELECT = {"masked": "val_masked_chi2", "total": "val_total_chi2", "unmasked": "val_unmasked_chi2"}
+SELECT = {"masked": "val_masked_chi2", "total": "val_total_chi2", "unmasked": "val_unmasked_chi2", "wmse": "val_wmse"}
 
 
 def build_parser():
@@ -49,7 +49,13 @@ def build_parser():
     ap.add_argument("--min-lr-frac", type=float, default=0.1, help="cosine decay floor as a fraction of --lr")
     ap.add_argument("--wd", type=float, default=0.01)
     ap.add_argument("--clip", type=float, default=1000.0, help="global grad-norm clip (the grad norm starts in the thousands and falls to tens)")
-    ap.add_argument("--huber", type=float, default=0.0, help="Huber threshold in sigma for the reconstruction loss (default 0 = plain ivar-weighted chi2 on the hidden pixels)")
+    ap.add_argument("--rec-loss", choices=["wmse", "chi2"], default="wmse",
+                    help="wmse (default): ivar-weighted MSE per object in normalized flux units, mean over objects (training/loss.py weighted_mse_loss); chi2: pooled ivar-weighted chi2 (the earlier runs)")
+    ap.add_argument("--loss-pixels", choices=["all", "hidden"], default="all",
+                    help="all (default): the loss covers every natively good pixel, hidden AND visible; hidden: only the artificially hidden pixels (the earlier runs)")
+    ap.add_argument("--hidden-weight", type=float, default=1.0, help="wmse: extra weight of the hidden pixels relative to the visible ones (1 = equal)")
+    ap.add_argument("--w-cap", type=float, default=100.0, help="wmse: cap on a pixel's weight as a multiple of its object's median weight (protects against pathological ivar; 0 = off)")
+    ap.add_argument("--huber", type=float, default=0.0, help="Huber threshold in sigma for --rec-loss chi2 (default 0 = plain ivar-weighted chi2)")
     ap.add_argument("--mask-frac-min", type=float, default=0.05, help="hidden fraction of the good pixels drawn per view: uniform on [min, max]")
     ap.add_argument("--mask-frac-max", type=float, default=0.75)
     ap.add_argument("--degrade", action=argparse.BooleanOptionalAction, default=True,
@@ -74,7 +80,7 @@ def build_parser():
     ap.add_argument("--recon-every", type=int, default=1000, help="steps between reconstruction figures (multiple of --eval-every)")
     ap.add_argument("--save-every", type=int, default=1000)
     ap.add_argument("--log-every", type=int, default=50)
-    ap.add_argument("--select", choices=list(SELECT), default="masked", help="validation metric that decides best.pt")
+    ap.add_argument("--select", choices=list(SELECT), default="wmse", help="validation metric that decides best.pt (wmse = the training objective on the validation set: all good pixels, masked input)")
     ap.add_argument("--plot-z", default="0.3,1.0,2.0,3.0,4.0", help="target redshifts of the plotted validation spectra")
     ap.add_argument("--eval-batch", type=int, default=64)
     ap.add_argument("--workers", type=int, default=8)
@@ -245,7 +251,7 @@ def main(argv=None):
             print("matplotlib missing: skipping figures (logs are still written)", flush=True)
         e1 = " | E1 " + ", ".join(f"{k}:{v:.2f}" for k, v in metrics.get("E1_by_snr", {}).items())
         zs = f" | z sigma_NMAD {metrics['z_sigma_nmad']:.4f} cat {metrics['z_cat_frac']:.3f} rmse(log1p) {metrics['z_rmse_log1p']:.3f}" if head else ""
-        print(f"[eval @ {step_done}] masked chi2 {metrics['val_masked_chi2']:.3f} | total (masked in) {metrics['val_total_chi2']:.3f} | unmasked {metrics['val_unmasked_chi2']:.3f} "
+        print(f"[eval @ {step_done}] wmse {metrics['val_wmse']:.4f} (unmasked {metrics['val_unmasked_wmse']:.4f}) | masked chi2 {metrics['val_masked_chi2']:.3f} | total (masked in) {metrics['val_total_chi2']:.3f} | unmasked {metrics['val_unmasked_chi2']:.3f} "
               f"bin8 {metrics['val_unmasked_bin8']:.2f}{zs}{e1} | {args.select}-best {best:.3f}{' *NEW BEST*' if row.get('new_best') else ''} ({row['eval_seconds']:.0f}s)", flush=True)
 
     model.train()
@@ -262,13 +268,17 @@ def main(argv=None):
         good = (mask == 0) & (ivar > 0)
         for p in params:
             p.grad = None
+        score = good if args.loss_pixels == "all" else hidden                               # pixels the reconstruction loss covers
         with autocast():
             lat = model.encode(apply_hidden(x, hidden))
-            qi, qw = gather_hidden_queries(hidden)
+            qi, qw = gather_hidden_queries(score)
             pred = model.decoder(lat[:, 1:], qv[qi])
         s = 10 ** lat[:, 0, 0].float()
-        fq, iq = flux.gather(1, qi), ivar.gather(1, qi)
-        loss_rec = hidden_loss(pred.float(), s, fq, iq, qw, huber)
+        fq, iq, hq = flux.gather(1, qi), ivar.gather(1, qi), hidden.gather(1, qi)
+        if args.rec_loss == "wmse":
+            loss_rec = weighted_mse_loss(pred.float(), s, fq, iq, qw, hq, args.hidden_weight, args.w_cap)
+        else:
+            loss_rec = hidden_loss(pred.float(), s, fq, iq, qw, huber)
         loss_z, stats = None, {}
         if head is not None:
             pz = head(lat[:, 1:].float())
@@ -279,14 +289,18 @@ def main(argv=None):
             if bad_streak >= 20:
                 raise RuntimeError("20 consecutive non-finite losses")
             continue
-        with torch.no_grad():
+        with torch.no_grad():                                                                # chi2 monitors (pure noise = 1), whatever the training loss is
             r2 = (fq - s.unsqueeze(-1) * pred.float()) ** 2 * iq
-            chi2_h = (r2 * qw).sum() / qw.sum().clamp_min(1)
-            vi, vw = sample_pixels(good & ~hidden, 1024)
-            with autocast():
-                pv = model.decoder(lat[:, 1:].detach(), qv[vi])
-            chi2_v = ((flux.gather(1, vi) - s.unsqueeze(-1) * pv.float()) ** 2 * ivar.gather(1, vi) * vw).sum() / vw.sum().clamp_min(1)
-            frac_beyond = ((r2 > (huber or 5.0) ** 2) & qw).sum() / qw.sum().clamp_min(1)       # hidden pixels beyond the Huber threshold (gradient capped)
+            mh, mv = qw & hq, qw & ~hq
+            chi2_h = (r2 * mh).sum() / mh.sum().clamp_min(1)
+            if args.loss_pixels == "all":
+                chi2_v = (r2 * mv).sum() / mv.sum().clamp_min(1)                             # visible pixels were decoded for the loss: no extra pass
+            else:
+                vi, vw = sample_pixels(good & ~hidden, 1024)
+                with autocast():
+                    pv = model.decoder(lat[:, 1:].detach(), qv[vi])
+                chi2_v = ((flux.gather(1, vi) - s.unsqueeze(-1) * pv.float()) ** 2 * ivar.gather(1, vi) * vw).sum() / vw.sum().clamp_min(1)
+            frac_beyond = ((r2 > (huber or 5.0) ** 2) & mh).sum() / mh.sum().clamp_min(1)       # hidden pixels beyond 5 sigma (the Huber gradient cap of the earlier runs)
             n_h, n_v = hidden.sum(), (good & ~hidden).sum()
             chi2_t = (n_h * chi2_h + n_v * chi2_v) / (n_h + n_v).clamp_min(1)
         if head is None or loss_z is None:

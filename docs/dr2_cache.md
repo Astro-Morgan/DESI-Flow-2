@@ -67,6 +67,9 @@ Counts: 197,810 TGT rows and 64,234 SKY rows have no good pixel (fully masked; `
   (74,852 sky rows, up to 32k rows per coadd file) stalled with that strategy, so the committed code reads contiguous
   blocks of the file and then selects the wanted rows. Both strategies run the same `coadd_cameras` on the same rows, so
   the result is the same; only the file access pattern differs.
+* Sky resolution (9,489,661 rows): the per-group ledger counts equal the number of sky rows in every one of the 56,780
+  groups; in a random sample of 20,000 rows the all-zero matrices (133, 0.67%) are exactly the rows with `ngood == 0`
+  (fully masked spectra, whose coadd file stores a zero matrix), and no other row is zero or NaN.
 * Not validated: the cross-exposure official `desispec.coaddition.coadd` (healpix coadds have no per-exposure fibermap rows).
 
 ## Reproduce

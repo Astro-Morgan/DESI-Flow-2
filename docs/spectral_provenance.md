@@ -24,25 +24,32 @@ installed 0.73.3 is newer, so a docstring below describes Loa only if it also ho
 
 ## What a cached target spectrum contains
 
-Write `f` for the true spectrum, `C` for the true calibration of the fibre, `C_fit` for the pipeline's, `S` for the true sky
-(in electrons) and `m` for the sky model:
+Work in electrons first. Let `T` be the true instrument response (counts per unit physical flux), `f` the true object spectrum,
+`s` the true sky radiance in physical units, `m_e` the sky model in electrons (fitted to the counts of the sky fibres) and
+`C_fit` the pipeline calibration. The counts are `d = T (R f + s) + noise`, so the cframe is
 
-    y = (C / C_fit) R f  +  (S - m) / C_fit  +  noise / C_fit
-        multiplicative       additive            noise
-        g(lambda) R f        A(lambda)
+    y = (d - m_e) / C_fit = (T / C_fit) R f  +  (T s - m_e) / C_fit  +  noise / C_fit
+                            g R f               delta_e / C_fit           noise / C_fit
 
-* `g = C / C_fit` is the calibration error. It multiplies the object, so only flux can reveal it.
-* `A = (S - m) / C_fit` is the additive sky-subtraction error. It is the same kind of quantity for every fibre of the petal, with
-  fibre-dependent parts (throughput, LSF, position gradient) that the model only partly captures.
+with `g = T / C_fit` the calibration error and `delta_e = T s - m_e` the sky-subtraction error in electrons. Equivalently
+`delta_e / C_fit = g (s - m_e / T)`: in physical terms the additive term carries a factor `g`, but it multiplies a quantity
+(`s - m_e / T`, the model error in physical units) that is about 1% of the sky, so a 5% calibration error changes it by about
+0.05% of the sky. The calibration drops out of the sky subtraction itself (done in electrons, before the division); it enters the
+additive term only through the division by `C_fit(lambda)`, which is known exactly per exposure and petal (`fluxcalib`) and falls by
+a factor of 5-10 at the blue edge of each camera and in the telluric A band (figure `sky_leakage_recon`, bottom panel).
+
+* `g` multiplies the object: only flux can reveal it.
+* `A = delta_e / C_fit` is the additive sky-subtraction error; a structure that is smooth in electrons shows edges in flux because
+  of the division by `C_fit`.
 
 ## What the cached SKY rows contain
 
-For a sky fibre `f = 0`, so the cached row is `A + noise` (calibrated and averaged over the exposures of that coadd; a sky
+For a sky fibre `f = 0`, so the cached row is `delta_e / C_fit + noise / C_fit` (calibrated and averaged over the exposures of that coadd; a sky
 TARGETID is exposure-specific, so these are single exposures). Two properties follow:
 
 * They are in-sample. The sky fibres are the data the model `m` was fitted to, so their `A` is smaller than at a target fibre
   by roughly the leverage of the fit. The honest measure of `A` at a target is a leave-fibres-out residual.
-* They are blind to `g`, because nothing multiplies.
+* They are blind to `g` in practice (it multiplies a term that is about 1% of the sky), so they cannot be used to measure it.
 
 ## What the exposure sky model is good for
 
@@ -58,3 +65,18 @@ templates.
 * Whether the optional offset fit (`fit_offsets`) was on in kibo; it would change the mean offset seen in the SKY rows.
 * Standard-star fitting details (model grid, colours used).
 * The recipe of the DR1 sky VAC (contacts on its documentation page: M. Dowicz, D. Kirkby).
+
+## Test of the electron-space picture (24 exposures, `sky_leakage_recon.py`)
+
+119 of 240 exposure-petal pairs could be read (the rest failed to open; not investigated). Across pairs, per wavelength, the
+sky-fibre residual was regressed on the sky model, in flux units and in electrons:
+
+* flux units: slope -0.002 (b), -0.006 (r), -0.013 (z), growing to -0.04 at the z red edge, offset about +0.03e-17;
+* electrons: slope -0.0002, -0.0002, -0.0005 (consistent with none) and a constant offset of -0.7 (b), -1.1 (r), -1.8 (z) e/A,
+  -4.7 e/A at the z red edge. Divided by `C_fit` this gives about -0.03e-17 in all cameras and -0.13e-17 at the z red edge,
+  against an observed mean residual of -0.02e-17 and -0.10e-17.
+
+The flux-unit slope is not trustworthy: the residual and the sky model are both divided by `C_fit`, which varies between
+exposures and petals, and a shared divisor creates a correlation. Whether the mean residual is a constant electron deficit
+divided by `C_fit` or a fraction of the sky is not settled by this sample (correlation of the smoothed mean residual with the
+electron-offset prediction: 0.33 b, 0.04 r, 0.94 z; with the sky-fraction prediction 0.43, 0.12, 0.94).

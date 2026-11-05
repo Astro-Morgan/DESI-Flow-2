@@ -23,6 +23,12 @@ row `i` of that directory's metadata (no index lookup).
 | `tgt/sc_*.npy` | super-coadds, see below |
 | `sky/resolution.npy` | float16 (n, 11, 7781) resolution matrices of every sky row |
 
+**What `sky/` is.** The OBJTYPE SKY rows are the spectra of the sky fibres after the pipeline's sky subtraction and flux
+calibration: the residual of the fibre and the sky model that was fitted to those same fibres. They measure noise plus the
+pipeline's additive sky-subtraction error (median per-pixel S/N is about 0); they are not the sky spectrum itself. The sky
+model and the calibration live in the per-exposure `sky-*`, `fluxcalib-*`, `frame-*` and `cframe-*` files of the Loa
+`exposures/` tree (see docs/sky_templates_recon.md).
+
 Counts: 197,810 TGT rows and 64,234 SKY rows have no good pixel (fully masked; `snr_med` is NaN). Median `snr_med`:
 2.28 (TGT), -0.03 (SKY).
 

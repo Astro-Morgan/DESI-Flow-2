@@ -170,3 +170,29 @@ Figures `template_comparison_shapes`, `template_comparison_fits`, `template_comp
 - Population (median over targets): galaxies show a +2-2.5% bump at 5000-5800 A in b that falls to ~0 in r at the same wavelengths (a camera
   discontinuity), then -1% at 6200-7000 A. Per-camera and global templates follow the discontinuity and the 6730 A step; the smooth multiplicative
   polynomials cannot. Stars have +-1% structure the fits leave in place (Paschen-region line dips at 8800-9200 A remain).
+
+## Physical templates with and without explicit nuisance terms (physical_templates.py, physical_figures.py)
+
+Question: are explicit instrument/sky terms needed, or do augmented training inputs make linear template fits robust? Setup: K = 24 rest-frame
+templates (log-lambda grid, 3e-5 dex) learned through the mean DR2 library resolution matrix at the known redshift of 60,000 secure galaxies
+(0.02 < z < 1, snr_med > 4, DELTACHI2 > 100; 8,000 held out by TARGETID % 10), masked-denoising loss, 2500 steps, batch 96. Nuisance group fitted jointly
+per spectrum with Gaussian priors: per-camera additive offsets (3), per-camera instrument templates (3/4/12), sky templates (VAC K = 24, prior 1% of the VAC
+coefficient scatter), per-camera multiplicative Legendre degree <= 2 times the first-pass model (8 terms, b constant dropped: b is the reference).
+Augmentation: multiplicative curves, offsets, global K = 20 instrument-template combinations (real SKY-row coefficients), VAC sky spectra, each scaled to add
+about 0.075 chi2/px (natural sizes added 0.23 / 1.9 / 16.5 / 0.011); scored against the clean spectrum. Arms: A plain, B augmented, C nuisance group, D both.
+
+Hidden-pixel chi2 per pixel on held-out real galaxies (paired difference against A in brackets, standard error over rows):
+
+| arm | plain fit | with nuisance fit |
+|---|---|---|
+| A plain | 1.408 | 1.314 |
+| B augmentation | 1.437 (+0.028 +- 0.025) | 1.331 (+0.017 +- 0.017) |
+| C nuisance group | 1.683 (+0.275 +- 0.086) | 1.292 (-0.022 +- 0.015) |
+| D both | 1.737 (+0.328 +- 0.128) | 1.295 (-0.019 +- 0.012) |
+
+D against C: +0.003 +- 0.005 (real), +0.005 +- 0.003 (augmented). Reading: (1) augmentation alone does nothing for the linear fit (also on augmented
+test data: +0.004 +- 0.009); (2) the explicit nuisance group at fit time is what helps (-6.7% for the plain-trained templates); (3) training with the group
+adds only ~1.7% (about 1.5 sigma) and makes the templates depend on it (plain fit +0.28); (4) augmentation on top of the group adds nothing.
+Caveats: single seed, K = 24 only, galaxies only, mean R stand-in; the nuisance part alone carries a smooth additive level of 1-2e-17 (figure
+physical_arms_fits), i.e. the offset priors (sigma 0.7-1.1 from SKY-row camera means) are loose enough that the group absorbs continuum flux; the hyperparameters
+were not tuned. Figures: physical_arms_chi2, physical_arms_templates, physical_arms_fits (with .npz caches in docs/figures).

@@ -158,3 +158,15 @@ being fitted to targets, and the two kinds of term are complementary. The multip
 0.6 +- 1.9, r -0.4 +- 0.8, z 0.2 +- 0.3. The median fractional residual (data - model) / model of all targets shows common +-1%
 structure (+1-2% at 4000-4400 A, +1% at 5000-5900, -0.7% at 6200-7000, +1% at 8000-9300, falling to -1% at 9500-9800) that is
 calibration, Redrock-template mismatch, or both. Polynomials and templates also absorb physical template mismatch.
+
+## Visual comparison of the candidates (template_fit_comparison.py)
+
+Figures `template_comparison_shapes`, `template_comparison_fits`, `template_comparison_population` (each with a same-named .npz).
+- Shapes: the per-camera templates carry steps inside a camera (r #2 near 6730 A, z #4 near 8700 A; plausibly CCD amplifier boundaries, not
+  verified) and sky-line spikes (r #3-4, z #3); the global K=20 set mixes these into smoother combinations. z templates bend strongly beyond 9300 A.
+- Fits (four fixed-seed random targets, not selected by outcome): fitted corrections are small against the smoothed residual, which is dominated by
+  template mismatch; hidden-pixel chi2 hardly changes on these four (only star 603 improves slightly). The per-camera fit can overreach at the red end
+  of bright stars (star 506, camera z, -130 against a scale of +-50).
+- Population (median over targets): galaxies show a +2-2.5% bump at 5000-5800 A in b that falls to ~0 in r at the same wavelengths (a camera
+  discontinuity), then -1% at 6200-7000 A. Per-camera and global templates follow the discontinuity and the 6730 A step; the smooth multiplicative
+  polynomials cannot. Stars have +-1% structure the fits leave in place (Paschen-region line dips at 8800-9200 A remain).

@@ -122,3 +122,39 @@ Corrections to the section above: the "typical amplitude" (std of the coefficien
 tails; the robust median amplitudes are 0.006 (#1), 0.035 (#2), 0.006 (#3), 0.017 (#4) [1e-17 erg/s/cm2/A], 90th percentiles 0.09, 0.32,
 0.06, 0.13. The correlations of the coefficients with the measured camera offsets share pixels with the coefficients (window means
 and template fits use the same data) and are not clean evidence.
+
+## Target-residual test and per-camera templates (`target_residuals.py`, `target_nuisance_test.py`, `camera_templates.py`; figures `target_nuisance_test`, `camera_template_chi2_vs_K`)
+
+**Per-camera instrument templates.** Each camera trained separately on its own brz-grid segment of the SKY rows (the overlaps are the merged
+pixels of the cache), K = 1..48, hold-out hidden-pixel chi2 (zero model in brackets): b best at K = 3, 0.9011 (0.9318); r best at K = 4,
+0.9280 (0.9830); z best at K = 12, 0.9683 (1.1046); each camera overfits beyond its best K. 19 terms in all, against 20 for the global
+set. Overlap rule for applying per-camera terms to a merged brz spectrum: `coadd_cameras` combines the overlap pixels as the
+inverse-variance weighted mean of the two cameras and copies the rest (read in the source); `merge_camera_terms` does the same for the
+fitted terms (tested). In the target test below the data are per camera and each camera is fitted separately, so no merging enters.
+
+**Test on targets.** 3,000 galaxies (ZWARN 0, DELTACHI2 > 500, z < 1.5) and 1,000 stars with S/N > 8; the Redrock model rebuilt from
+`COEFF` (Template.eval with the camera resolution, validated: rebuilt chi2 / zall CHI2 = 1.014); residual = data - model per camera;
+nuisance terms fitted on the visible pixels, chi2 per pixel scored on hidden spans (same spans for every method, two draws). The
+model as it is: 5.64 per hidden pixel (galaxies 4.79, stars 8.19), dominated by template mismatch.
+
+| method | terms | gain over the model as it is | edge zones | targets improved |
+|---|---|---|---|---|
+| one scale per camera | 3 | 0.4% | worse | 44% |
+| additive Legendre per camera (deg 2) | 9 | 8.6% | -0.75 | 75% |
+| multiplicative Legendre per camera x model | 9 | 10.1% | -0.98 | 73% |
+| global instrument templates K = 20 | 20 | 6.5% | -0.35 +- 0.26 | 80% |
+| per-camera templates (3, 4, 12) | 19 | 9.2% | -0.77 | 79% |
+| multiplicative + global K = 20 | 29 | 13.7% | -1.02 | 75% |
+| multiplicative + per-camera templates | 28 | 14.2% | -1.08 | 75% |
+
+(edge zones: change of the hidden chi2 per pixel in the 150 A camera-edge zones.) Paired differences (first minus second, negative favours the
+first): per-camera minus global K = 20: -0.153 +- 0.053 (edge -0.43 +- 0.25; stars -0.20 +- 0.14); per-camera minus additive Legendre:
+-0.032 +- 0.074 (equal); per-camera minus multiplicative: +0.049 +- 0.041 (equal; stars -0.06 +- 0.07); multiplicative + per-camera
+minus multiplicative alone: -0.231 +- 0.038; versus multiplicative + global: -0.026 +- 0.009.
+
+Reading: a per-camera scale does nothing (the cameras agree in amplitude on average, as the overlaps showed); what helps is shape within
+a camera. Additive per-camera instrument terms learned from sky fibres reach 90% of the gain of nine free multiplicative terms without
+being fitted to targets, and the two kinds of term are complementary. The multiplicative scatter fitted per camera (percent): b
+0.6 +- 1.9, r -0.4 +- 0.8, z 0.2 +- 0.3. The median fractional residual (data - model) / model of all targets shows common +-1%
+structure (+1-2% at 4000-4400 A, +1% at 5000-5900, -0.7% at 6200-7000, +1% at 8000-9300, falling to -1% at 9500-9800) that is
+calibration, Redrock-template mismatch, or both. Polynomials and templates also absorb physical template mismatch.

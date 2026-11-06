@@ -46,6 +46,17 @@ def test_training_learns_the_signal_subspace_and_beats_the_zero_model_on_held_ou
     return f"held-out hidden chi2 {hid.mean():.2f} vs zero model {base.mean():.2f}; the true templates lie in the learned span to {100 * float(resid):.1f}%"
 
 
+def test_merge_camera_terms_follows_the_ivar_weighted_overlap_rule():
+    from DESIFlow.templates.camera_templates import CAMS, merge_camera_terms
+    terms = {c: np.full(b - a, v) for (c, (a, b)), v in zip(CAMS.items(), (1.0, 2.0, 3.0))}
+    ivars = {c: np.full(b - a, w) for (c, (a, b)), w in zip(CAMS.items(), (1.0, 3.0, 1.0))}
+    m = merge_camera_terms(terms, ivars)
+    assert m[100] == 1.0 and m[3500] == 2.0 and m[7000] == 3.0                                   # outside the overlaps each camera is copied
+    assert abs(m[2720] - (1 * 1.0 + 3 * 2.0) / 4) < 1e-12                                          # b-r overlap: 5760-5800 A is brz index 2700-2750
+    assert abs(m[5000] - (3 * 2.0 + 1 * 3.0) / 4) < 1e-12                                          # r-z overlap: 7520-7620 A is brz index 4900-5025
+    return "overlap pixels are the inverse-variance weighted mean of the two cameras, the rest a copy"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -93,3 +93,32 @@ b); a flat offset is 94% in template 1; a z red-edge ramp 92% in the first three
 
 These are additive structures measured on sky fibres (no signal to multiply), so they are camera offsets and edge behaviour of the
 sky-subtracted residual, not by themselves a multiplicative calibration error.
+
+## Camera overlap test on targets (`camera_overlap_test.py`, `stack_junction_check.py`; figures `camera_overlap_test`, `stack_junction_check`)
+
+6,000 targets (half S/N 3-10, half > 10), per-camera arrays of the healpix coadds. Mean flux of each camera over the b-r overlap
+(5762-5798 A) and the r-z overlap (7522-7578 A, clear of the telluric A band), Delta = second - first camera, fitted as
+Delta = a + m Fbar:
+
+| overlap | a [1e-17] | m | median ratio - 1 above 3e-17 |
+|---|---|---|---|
+| b - r | +0.009 +- 0.004 | -0.14% +- 0.02% | +0.2 to +0.8% |
+| r - z | -0.010 +- 0.002 | +0.20% +- 0.01% | within +-0.3% |
+
+* On average the cameras agree at the overlaps to 0.01e-17 and 0.2%.
+* Target by target they do not: the scatter of Delta beyond its measurement error is 1.3-3.4% of the flux for b-r and 0.9-2.0% for
+  r-z, and in absolute units it grows with the flux (b-r: 0.03, 0.18, 0.36, 0.88e-17 in the bins 1-3, 3-10, 10-30, 30-160e-17). That is
+  a zero-mean, percent-level, multiplicative-type mismatch (some of it may be real differences in line content or LSF inside the windows).
+* Additive stand-in: a multiplicative error m on a whole camera leaves, after the best constant additive offset, |m| rms(F)/mean(F)
+  of the flux. The spectral shape rms/mean inside a camera is 0.07 (r), 0.06 (z) and 0.25 (b) in the median (0.16, 0.11, 0.49 at the
+  90th percentile). For m = 2% the leftover is 0.14% (r), 0.13% (z) and 0.5% (b; 1% at the 90th percentile) of the flux, below the noise
+  of any spectrum of S/N below about 100 per pixel. This holds for errors that are constant over a camera, not for shapes that vary
+  inside it (the edges).
+* The junction steps of the SKY stack do not appear in targets: stacks of 30,000 SKY rows give steps of +0.0048 +- 0.0010 (5780 A)
+  and -0.0043 +- 0.0007 (7570 A) [1e-17], stacks of 30,000 faint targets +0.0003 +- 0.0006 and -0.0009 +- 0.0004. The camera-step
+  coefficients of the SKY templates are therefore not shown to measure target calibration errors.
+
+Corrections to the section above: the "typical amplitude" (std of the coefficient times the template) was dominated by heavy
+tails; the robust median amplitudes are 0.006 (#1), 0.035 (#2), 0.006 (#3), 0.017 (#4) [1e-17 erg/s/cm2/A], 90th percentiles 0.09, 0.32,
+0.06, 0.13. The correlations of the coefficients with the measured camera offsets share pixels with the coefficients (window means
+and template fits use the same data) and are not clean evidence.

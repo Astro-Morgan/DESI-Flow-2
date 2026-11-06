@@ -69,3 +69,27 @@ history; `summary.json` per kind; the prepared training and hold-out arrays; `ru
 * The sky chi2 values depend on the assumed weights; only the shape of the curve and the comparison with the zero model carry
   over. The recipe of the VAC is not documented.
 * Differences between K = 12 and K = 32 (instrument) are within about one standard error; one seed.
+
+## What the K = 20 instrument templates are (`inspect_templates.py`, figures `instrument_templates_K020`, `..._summary`)
+
+The set is an orthonormal basis ordered by the energy it carries on the data. Per-template measures (the energy share, the power
+within 150 A of a camera edge, the power on the strongest sky-line pixels, the share explained by a piecewise quadratic per camera, and
+the correlation of the coefficient on the hold-out spectra with the measured camera offsets):
+
+| template | energy | what it looks like | evidence |
+|---|---|---|---|
+| 1 | 72.4% | a smooth positive offset in all three cameras, rising steeply over the last 500 A of z | coefficient correlates 0.72 / 0.79 / 0.75 with the measured mean offset in b / r / z; a flat offset over all cameras lies 94% in this template alone; 20% of a red-edge ramp |
+| 2 | 8.3% | the b camera high, r and z near 0: a step at the b/r junction | correlation -0.70 with the r - b offset; step -0.78 rms |
+| 3 | 6.0% | r and z slightly positive, then a sharp fall over 9200-9824 A; noisy rise at 3600 A | 47% of its power in the camera-edge zones (14% of the pixels); with #1 and #2 it holds 92% of a z red-edge ramp |
+| 4 | 3.0% | the r camera low relative to b and z: steps at both junctions | correlation +0.69 with the z - r offset, -0.38 with r - b |
+| 6, 10 | 1.3%, 0.7% | piecewise-smooth shapes inside a camera | camera-quadratic R2 0.62 and 0.60 |
+| 12, 13, 14, 20 | 0.5%, 0.5%, 0.5%, 0.2% | swings at the blue edge (3600-4500 A) of different shapes | 24-37% of their power in the edge zones |
+| 5, 8, 9, 11, 15, 16 | 0.4-1.8% each | sky-line patterns in r and z (7000-9800 A) | 54-63% of their power on 8% of the pixels |
+| 7, 17-19 | 0.2-1.0% | mixed | |
+
+The first four templates together span a pure per-camera constant offset to 95% (b), 93% (r) and 96% (z) (the first two give 90% for
+b); a flat offset is 94% in template 1; a z red-edge ramp 92% in the first three. A blue-edge decay of 120 A is only 41% in the first
+12 templates and 71% in all 20: the blue-edge swings are spread over several templates.
+
+These are additive structures measured on sky fibres (no signal to multiply), so they are camera offsets and edge behaviour of the
+sky-subtracted residual, not by themselves a multiplicative calibration error.

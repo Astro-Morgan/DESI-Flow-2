@@ -100,3 +100,21 @@ The rms does not depend on the number of sky fibres used (no sign of in-sample l
 candidates are the read-noise or gain used in the variance model, the Poisson term being estimated from the noisy data (the
 preprocessing code comments that this is biased), and the extra variance added to the sky model. The residuals of sky fibres
 may not carry over to target fibres, whose counts include the object.
+
+## Test of the variance model on targets (repeat observations, `ivar_repeat_check.py`)
+
+For 19,523 targets with exactly two cached coadds (independent exposures, different survey/program), the normalised difference
+`(f1 - f2) sqrt(ivar1 ivar2 / (ivar1 + ivar2))` should have rms 1. Robust width (1.4826 median|d|) by wavelength and median S/N:
+
+| S/N | 3600-3900 | 4000-5500 | 5800-7400 | 7700-9300 | 9500-9824 |
+|---|---|---|---|---|---|
+| faint (< 1.5), 4,129 pairs | 1.00 | 1.00 | 1.00 | 1.05 | 1.03 |
+| middle (1.5-5), 9,165 pairs | 1.01 | 1.01 | 1.05 | 1.15 | 1.10 |
+| bright (> 5), 6,229 pairs | 1.12 | 1.29 | 1.37 | 1.53 | 1.44 |
+
+For faint targets the stated variance matches the scatter to within 1% in b and r and is underestimated by about 5% in rms in z.
+The low-count overestimate seen on sky fibres (rms 0.57-0.9) is not present on targets, so it is specific to the sky-fibre
+residuals (an in-sample fit effect is the likely reason, not established). The excess for bright targets is real variability and
+calibration differences between the two observations, not noise. Caveats: the pairs come from different programs and
+conditions, the electron counts of the targets are not known from the cache, and the excess in the middle bin may include
+variability.

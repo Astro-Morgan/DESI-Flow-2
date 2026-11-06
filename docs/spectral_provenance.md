@@ -80,3 +80,23 @@ The flux-unit slope is not trustworthy: the residual and the sky model are both 
 exposures and petals, and a shared divisor creates a correlation. Whether the mean residual is a constant electron deficit
 divided by `C_fit` or a fraction of the sky is not settled by this sample (correlation of the smoothed mean residual with the
 electron-offset prediction: 0.33 b, 0.04 r, 0.94 z; with the sky-fraction prediction 0.43, 0.12, 0.94).
+
+## Test of the variance model (24 exposures, `sky_rms_recon.py`)
+
+The rms of `flux * sqrt(ivar)` on sky fibres is the same in electrons and in calibrated flux (the factor `C` cancels), so the
+smooth wavelength dependence of panel 1 of `sky_residual_recon` cannot be a calibration (shape or amplitude) effect. It is
+set by the electron counts: against the sky model counts per fibre the three cameras fall on one curve,
+
+| counts (e/A per fibre) | rms b | rms r | rms z |
+|---|---|---|---|
+| 1-10 | 0.73 | 0.77 | 0.87 |
+| 10-100 | 0.92 | 0.97 | 1.01 |
+| 100-1000 | 0.98 | 0.98 | 1.02 |
+
+(down to 0.57 at 3 e/A in b). At fixed high counts the rms is about 1 at all wavelengths apart from sky-line spikes in r and z.
+The counts follow sensitivity times sky brightness, so a counts-dependent error in the variance looks like a sensitivity curve:
+the stated variance is too large where the counts are low (variance overestimated by 1/rms^2, up to a factor 3 in b at 3 e/A).
+The rms does not depend on the number of sky fibres used (no sign of in-sample leverage). The cause is not determined; the
+candidates are the read-noise or gain used in the variance model, the Poisson term being estimated from the noisy data (the
+preprocessing code comments that this is biased), and the extra variance added to the sky model. The residuals of sky fibres
+may not carry over to target fibres, whose counts include the object.

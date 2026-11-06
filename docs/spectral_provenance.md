@@ -118,3 +118,20 @@ residuals (an in-sample fit effect is the likely reason, not established). The e
 calibration differences between the two observations, not noise. Caveats: the pairs come from different programs and
 conditions, the electron counts of the targets are not known from the cache, and the excess in the middle bin may include
 variability.
+
+## Would sky-shaped templates help? (`sky_line_regression.py`, 24 exposures, 12,102 sky-fibre fits)
+
+Each sky fibre's calibrated residual was fitted, per camera, with weights, by the exposure's own sky model `s`, then `ds/dlambda`, then
+`d2s/dlambda2` (nested). Chi2 removed per fibre in the sky-line pixels (the 8% of pixels with the largest `s` above its running
+median), against a control with the basis shuffled over wavelength:
+
+| camera | line-pixel chi2 per fibre | removed by s / +ds / +d2s | total | chance | real | share of line-pixel chi2 |
+|---|---|---|---|---|---|---|
+| b | 194 | 4.5 / 1.0 / 1.0 | 6.5 | 6.1 | 0.3 | 0.2% |
+| r | 176 | 2.0 / 17.6 / 1.1 | 20.7 | 4.3 | 16.4 | 9.3% |
+| z | 213 | 1.9 / 6.5 / 1.4 | 9.9 | 3.6 | 6.3 | 2.9% |
+
+The sky amplitude term removes almost nothing; the signal is in the first derivative, i.e. a wavelength mismatch of the sky model
+on the lines (r camera: a 9% share of the line-pixel chi2, which is under 1% of the chi2 of the whole spectrum). The chi2 per pixel
+is 0.9 to 1.0, so the residuals are close to noise. The test is in-sample (the sky model was fitted to these fibres), so the gain at
+target fibres could be larger or smaller.

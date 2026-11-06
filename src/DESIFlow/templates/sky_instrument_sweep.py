@@ -117,7 +117,15 @@ def sweep(kind, out, ks=KS, steps=1500, batch=512, lr=3e-3, seed=0):
 
 
 # ------------------------------------------------------------------------------------------------ figures
-def figures(out, figdir, cachedir):
+def nw_smooth(f, w, sigma):
+    """Gaussian-kernel weighted mean with sqrt(ivar) weights over the good pixels (the smoothing of the user's notebook)."""
+    from scipy.ndimage import gaussian_filter
+    good = w > 0
+    num = gaussian_filter(f * np.sqrt(w) * good, sigma); den = gaussian_filter(np.sqrt(w) * good, sigma)
+    return np.where(den > 0, num / np.where(den > 0, den, 1.0), np.nan)
+
+
+def figures(out, figdir, cachedir, dr2_cache=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -149,17 +157,27 @@ def figures(out, figdir, cachedir):
         s = sets[Ks[0]]["pixel_scale_s"]
         n = min(len(fe), 3000)
         f, w = np.asarray(fe[:n]), np.asarray(we[:n])
+        n0, extra_label = len(f), None
+        if kind == "instrument" and dr2_cache:                                                    # the user's own example: cache row 1000 of sky/
+            from DESIFlow.data.dr2_cache import load_index
+            Fc, Ic, Mc = (np.load(os.path.join(dr2_cache, "sky", k + ".npy"), mmap_mode="r") for k in ("flux", "ivar", "mask"))
+            ix = load_index(dr2_cache); tid1 = int(np.asarray(ix["targetid"])[int(np.asarray(ix["sky_rows"])[1000])])
+            tile1 = (-tid1) // 10000 if tid1 < 0 else None
+            f = np.vstack([f, np.asarray(Fc[1000])[None]]); w = np.vstack([w, np.where(np.asarray(Mc[1000]) == 0, np.asarray(Ic[1000]), 0.0)[None]])
+            extra_label = f"your notebook row (cache row 1000)\nTARGETID {tid1}, " + (f"tile {tile1}, {'held out' if tile1 % 20 == 0 else 'not held out'}" if tile1 is not None else "no tile derivable: never in the training or hold-out sets")
         g, om, _ = whiten(f, w, s)
         U = torch.tensor(sets[Kref if Kref in sets else Ks[1]]["templates_whitened"], device=dev)
         c = wls_project(U, torch.tensor(g, device=dev), torch.tensor(om, device=dev))
         chi_full = ((torch.tensor(om, device=dev) * (torch.tensor(g, device=dev) - c @ U) ** 2).sum(1) / (torch.tensor(om, device=dev) > 0).sum(1)).cpu().numpy()
         base = ((om * g ** 2).sum(1) / np.maximum((om > 0).sum(1), 1))
         gain = base - chi_full
-        order = np.argsort(gain)
-        pick = [order[int(0.5 * n)], order[int(0.97 * n)], order[int(0.1 * n)]]
+        order = np.argsort(gain[:n0])
+        pick = [order[int(0.5 * n0)], order[int(0.97 * n0)], order[int(0.1 * n0)]]
         labels = ["typical gain", "large gain", "small gain"]
+        if extra_label:
+            pick.append(n0); labels.append(extra_label)
         ncol = 3 if kind == "instrument" else 2
-        fig, ax = plt.subplots(3, ncol, figsize=(5.2 * ncol, 9.5))
+        fig, ax = plt.subplots(len(pick), ncol, figsize=(5.2 * ncol, 3.2 * len(pick)))
         ex = {"wavelength_A": LAM}
         for r, (i, lab) in enumerate(zip(pick, labels)):
             gi, oi = torch.tensor(g[i:i + 1], device=dev), torch.tensor(om[i:i + 1], device=dev)
@@ -173,8 +191,9 @@ def figures(out, figdir, cachedir):
             for cidx, (lo, hi) in enumerate(wins):
                 a = ax[r, cidx]; m = (LAM >= lo) & (LAM <= hi)
                 if kind == "instrument":
-                    a.plot(LAM[m], f[i][m], ".", ms=1.5, color="0.75", label="data")
-                    a.plot(LAM[m], median_filter(np.where(w[i] > 0, f[i], np.nan), 31, mode="nearest")[m], color="k", lw=1, label="data, 31-pixel median")
+                    a.plot(LAM[m], np.where(w[i] > 0, f[i], np.nan)[m], lw=0.6, alpha=0.4, color="tab:gray", label="data (masked pixels left out)")
+                    a.plot(LAM[m], nw_smooth(f[i], w[i], 11.0 / 6.0)[m], lw=0.7, color="k", label="data, smooth sigma = 11/6 px (your notebook)")
+                    a.plot(LAM[m], nw_smooth(f[i], w[i], 20.0)[m], lw=1.3, color="tab:purple", label="data, smooth sigma = 20 px")
                 else:
                     a.plot(LAM[m], f[i][m], color="k", lw=0.8, label="data")
                 for K, col in zip(Ks, ("tab:blue", "tab:orange", "tab:red")):
@@ -184,7 +203,7 @@ def figures(out, figdir, cachedir):
                     a.set_ylim(lo_y - pad, hi_y + pad)
                 a.set_xlabel("observed wavelength [Angstrom]"); a.set_ylabel("flux [1e-17 erg/s/cm2/A]" if kind == "instrument" else "sky [1e-17 erg/s/cm2/A/arcsec2]", fontsize=8 if kind == "sky" else 10)
                 if cidx == 0:
-                    a.set_title(f"{lab}: chi2/pixel {base[i]:.2f} -> {chi_full[i]:.2f} (K = {Kref})", fontsize=9); a.legend(fontsize=7)
+                    a.set_title(f"{lab}\nchi2/pixel {base[i]:.2f} -> {chi_full[i]:.2f} (K = {Kref}, fitted on all pixels)", fontsize=8); a.legend(fontsize=7)
         fig.tight_layout(); fig.savefig(os.path.join(figdir, f"template_examples_{kind}.png"), dpi=150); np.savez(os.path.join(cachedir, f"template_examples_{kind}.npz"), **ex)
         plt.close(fig)
         _log(f"{kind} examples saved")
@@ -208,4 +227,4 @@ if __name__ == "__main__":
         for k in kinds:
             sweep(k, a.out, ks=[int(x) for x in a.ks.split(",")] if a.ks else KS, steps=a.steps)
     if a.stage in ("figures", "all"):
-        figures(a.out, a.fig, a.figcache)
+        figures(a.out, a.fig, a.figcache, a.cache)

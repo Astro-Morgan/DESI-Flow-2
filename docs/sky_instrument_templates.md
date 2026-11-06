@@ -196,3 +196,12 @@ adds only ~1.7% (about 1.5 sigma) and makes the templates depend on it (plain fi
 Caveats: single seed, K = 24 only, galaxies only, mean R stand-in; the nuisance part alone carries a smooth additive level of 1-2e-17 (figure
 physical_arms_fits), i.e. the offset priors (sigma 0.7-1.1 from SKY-row camera means) are loose enough that the group absorbs continuum flux; the hyperparameters
 were not tuned. Figures: physical_arms_chi2, physical_arms_templates, physical_arms_fits (with .npz caches in docs/figures).
+
+### Simplified group: per-camera instrument (+ sky) templates only (arms E, F; ablation of A-D)
+
+Hidden chi2 per pixel on held-out real galaxies, templates of arm A (plain-trained) evaluated under subsets of the nuisance group: plain 1.408; offsets only
+1.392; multiplicative Legendre only 1.396 (no gain); sky only 1.374; per-camera instrument only 1.351 (-0.057 +- 0.021); instrument + sky 1.326; all 1.314.
+Instrument + sky therefore carries about 87% of the full group's gain. Training with the simplified group: E (instrument only) 1.338 evaluated with instrument
+terms (vs A 1.351: -0.013 +- 0.007); F (instrument + sky) 1.312 evaluated with both (vs A 1.326: -0.014 +- 0.008; vs C with the full group 1.292: +0.021 +- 0.018, not
+significant). Templates trained with the simplified group depend less on it (plain fit E 1.49, F 1.55, against 1.68 for C). Instrument-only training is the
+simplest option that stays within about 1 sigma of the full group when sky is added at inference.

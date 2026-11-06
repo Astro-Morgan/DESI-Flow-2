@@ -155,18 +155,27 @@ class Model:
         b = torch.einsum("bml,bl->bm", Xw, g)
         return torch.linalg.solve(A.double(), b.double()[..., None])[..., 0].float()
 
+    def comp_index(self, comps):
+        pref = {"off": "offset", "inst": "inst", "sky": "sky"}
+        return [i for i, k in enumerate(self.kinds) if any(k.startswith(pref[c]) for c in comps if c in pref)]
+
     def predict(self, phi, z, g, om_vis, mode):
+        """mode 'plain', 'nuis' (all components) or 'nuis:c1,c2' with components from off, inst, sky, mult."""
         A = self.design(phi, z); B = A.shape[0]; K = self.K
         pp = torch.full((K,), 1e-3, device=self.dev)
         if mode == "plain":
             th = self.solve(A, g, om_vis, pp)
             return torch.einsum("bm,bml->bl", th, A)
-        S = self.fixed_w[None].expand(B, -1, -1)
-        X1 = torch.cat([A, S], 1); prec1 = torch.cat([pp, self.prior_prec_fixed])
+        comps = set(mode.split(":")[1].split(",")) if ":" in mode else {"off", "inst", "sky", "mult"}
+        ix = self.comp_index(comps)
+        S = self.fixed_w[ix][None].expand(B, -1, -1); pf = self.prior_prec_fixed[ix]
+        X1 = torch.cat([A, S], 1) if len(ix) else A; prec1 = torch.cat([pp, pf])
         th1 = self.solve(X1, g, om_vis, prec1)
+        if "mult" not in comps:
+            return torch.einsum("bm,bml->bl", th1, X1)
         M0 = torch.einsum("bk,bkl->bl", th1[:, :K], A).detach()
         Mc = M0[:, None, :] * self.mult[None]
-        X2 = torch.cat([A, S, Mc], 1); prec2 = torch.cat([pp, self.prior_prec_fixed, self.mult_prec])
+        X2 = torch.cat([X1, Mc], 1); prec2 = torch.cat([prec1, self.mult_prec])
         th2 = self.solve(X2, g, om_vis, prec2)
         return torch.einsum("bm,bml->bl", th2, X2)
 
@@ -277,7 +286,8 @@ def load_data(ddir, name, dev, n=None):
     return {"f": torch.tensor(f), "w": torch.tensor(w), "z": torch.tensor(z)}
 
 
-ARMS = {"A": ("plain", False), "B": ("plain", True), "C": ("nuis", False), "D": ("nuis", True)}
+ARMS = {"A": ("plain", False), "B": ("plain", True), "C": ("nuis", False), "D": ("nuis", True), "E": ("nuis:inst", False), "F": ("nuis:inst,sky", False)}
+EVAL_MODES = ("plain", "nuis", "nuis:inst", "nuis:inst,sky")
 
 
 def main(ddir, tdir, out, K=24, steps=1500, batch=256, lr=3e-3, arms="ABCD", n_train=None, n_eval=None):
@@ -297,13 +307,27 @@ def main(ddir, tdir, out, K=24, steps=1500, batch=256, lr=3e-3, arms="ABCD", n_t
         mode, aug = ARMS[arm]; t0 = time.time(); log(f"arm {arm}: train mode {mode}, augmentation {aug}")
         phi, hist = train(m, tr, K, mode, aug, steps, batch, lr, 0, log)
         r = {"seconds": time.time() - t0, "train_hist": hist[::10].tolist()}
-        for em in ("plain", "nuis"):
+        for em in EVAL_MODES:
             for ea in (False, True):
                 v = evaluate(m, phi, ev, em, ea); r[f"eval_{em}_{'aug' if ea else 'real'}"] = [float(v.mean()), float(v.std() / np.sqrt(len(v)))]
-                np.save(os.path.join(out, f"perrow_K{K}_{arm}_{em}_{'aug' if ea else 'real'}.npy"), v.astype(np.float32))
+                np.save(os.path.join(out, f"perrow_K{K}_{arm}_{em.replace(':', '-').replace(',', '+')}_{'aug' if ea else 'real'}.npy"), v.astype(np.float32))
         res[arm] = r; log(f"arm {arm} done: " + ", ".join(f"{k} {r[k][0]:.4f}" for k in r if k.startswith("eval_")))
         np.savez(os.path.join(out, f"phi_K{K}_{arm}.npz"), phi=phi.cpu().numpy(), x0=X0, dlog=DLOG, nr=NR)
         json.dump(res, open(rp, "w"))
+
+
+def ablate(ddir, tdir, out, K=24, arms="ABCD", modes=("nuis:off", "nuis:inst", "nuis:sky", "nuis:mult", "nuis:off,inst", "nuis:inst,sky", "nuis:inst,mult")):
+    """Evaluate trained templates under subsets of the nuisance group (real held-out data only)."""
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tr, ev = load_data(ddir, "train", dev, 20000), load_data(ddir, "eval", dev)
+    m = Model(tdir, ddir, dev, K=K); m.set_whitening(load_data(ddir, "train", dev)["w"]); res = {}
+    for a in arms:
+        phi = torch.tensor(np.load(os.path.join(out, f"phi_K{K}_{a}.npz"))["phi"], device=dev); res[a] = {}
+        for md in ("plain",) + tuple(modes):
+            v = evaluate(m, phi, ev, md, False); res[a][md] = [float(v.mean()), float(v.std() / np.sqrt(len(v)))]
+            np.save(os.path.join(out, f"perrow_K{K}_{a}_{md.replace(':', '-').replace(',', '+')}_real.npy"), v.astype(np.float32))
+            print(a, md, round(res[a][md][0], 4), flush=True)
+    json.dump(res, open(os.path.join(out, f"ablation_K{K}.json"), "w"))
 
 
 if __name__ == "__main__":
@@ -311,5 +335,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--data", required=True); ap.add_argument("--templates", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--K", type=int, default=24); ap.add_argument("--steps", type=int, default=1500); ap.add_argument("--batch", type=int, default=256)
-    ap.add_argument("--arms", default="ABCD"); ap.add_argument("--lr", type=float, default=3e-3); ap.add_argument("--n-train", type=int, default=None); ap.add_argument("--n-eval", type=int, default=None)
-    a = ap.parse_args(); main(a.data, a.templates, a.out, a.K, a.steps, a.batch, lr=a.lr, arms=a.arms, n_train=a.n_train, n_eval=a.n_eval)
+    ap.add_argument("--arms", default="ABCD"); ap.add_argument("--lr", type=float, default=3e-3); ap.add_argument("--n-train", type=int, default=None); ap.add_argument("--n-eval", type=int, default=None); ap.add_argument("--ablate", action="store_true")
+    a = ap.parse_args()
+    if a.ablate:
+        ablate(a.data, a.templates, a.out, a.K, a.arms); raise SystemExit
+    main(a.data, a.templates, a.out, a.K, a.steps, a.batch, lr=a.lr, arms=a.arms, n_train=a.n_train, n_eval=a.n_eval)

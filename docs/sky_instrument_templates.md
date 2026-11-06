@@ -37,21 +37,28 @@
 | 8 | 0.9380 | 1.58 |
 | 12 | 0.9370 | 0.966 |
 | 16 | 0.9364 | 0.756 |
+| 20 | 0.9362 | (not run) |
 | 24 | 0.9363 | 0.505 |
 | 32 | 0.9371 | 0.431 |
 | 48 | 0.9389 | 0.383 |
 | 64 | 0.9412 | 0.367 |
+| 80 | (not run) | 0.349 |
+| 96 | (not run) | 0.353 |
+| 128 | (not run) | 0.344 |
 
-Standard errors: 0.002 (instrument), 0.02-1 (sky, larger at small K).
+Standard errors: 0.002 (instrument), 0.02-1 (sky, larger at small K); the K ladder was extended on request (instrument K = 20, sky K = 80, 96, 128).
 
 * Instrument: 6% of the 7.7% total gain comes from the first template; the curve is flat within the errors from K = 12 to 32 and
   rises beyond K = 32 while the in-sample (visible-pixel) chi2 keeps falling (0.9196 at K = 64): overfitting.
+* Instrument K = 20 (added on request) lies on the plateau, 0.9362 +- 0.0022.
+* Sky K = 80, 96 and 128 were added on request: the hold-out chi2 is flat from K = 48 (0.383) to 128 (0.344) within the standard error of
+  about 0.03, while the in-sample chi2 keeps falling (0.187 at K = 128), so templates beyond about 48 are overfitting.
 * Sky: the chi2 reaches 1 (the assumed 3% accuracy) at K = 12 and keeps improving slowly; the hold-out value separates from the
   in-sample one above K = 24 (0.505 / 0.404 at K = 24, 0.367 / 0.225 at K = 64).
 
 ## Files (not in the repository; `RepoClone/Claude/cache/sky_templates/`)
 
-`instrument/K001.npz ... K064.npz` and `sky/K001.npz ... K064.npz`, each with `templates_whitened` (K, 7781), `templates_flux`
+`instrument/K001.npz ... K064.npz` (13 sets, including K020) and `sky/K001.npz ... K128.npz` (15 sets), each with `templates_whitened` (K, 7781), `templates_flux`
 (K, 7781), `pixel_scale_s`, `energy`, `wavelength_A`, the hold-out metrics, the per-row hold-out chi2 and the training-loss
 history; `summary.json` per kind; the prepared training and hold-out arrays; `run.sh`.
 

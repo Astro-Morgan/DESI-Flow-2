@@ -98,7 +98,8 @@ def sweep(kind, out, ks=KS, steps=1500, batch=512, lr=3e-3, seed=0):
     G, O = to_gpu(f_tr, w_tr)
     GE, OE = to_gpu(np.load(os.path.join(d, "eval_flux.npy"), mmap_mode="r"), np.load(os.path.join(d, "eval_ivar.npy"), mmap_mode="r"))
     _log(f"{kind}: train {tuple(G.shape)}, eval {tuple(GE.shape)} on {dev}; pixel scale s from {s.min():.3g} to {s.max():.3g}")
-    summary = {}
+    spath = os.path.join(d, "summary.json")
+    summary = {int(k): v for k, v in json.load(open(spath)).items()} if os.path.exists(spath) else {}      # keep earlier K
     for K in ks:
         path = os.path.join(d, f"K{K:03d}.npz")
         t0 = time.time()
@@ -195,6 +196,7 @@ if __name__ == "__main__":
     ap.add_argument("--cache", default=None); ap.add_argument("--out", required=True)
     ap.add_argument("--fig", default=None); ap.add_argument("--figcache", default=None)
     ap.add_argument("--kinds", default="instrument,sky"); ap.add_argument("--steps", type=int, default=1500)
+    ap.add_argument("--ks", default=None, help="comma list of K for the sweep stage (default: the standard ladder)")
     a = ap.parse_args()
     kinds = a.kinds.split(",")
     if a.stage in ("prep", "all"):
@@ -204,6 +206,6 @@ if __name__ == "__main__":
             prep_sky(a.out)
     if a.stage in ("sweep", "all"):
         for k in kinds:
-            sweep(k, a.out, steps=a.steps)
+            sweep(k, a.out, ks=[int(x) for x in a.ks.split(",")] if a.ks else KS, steps=a.steps)
     if a.stage in ("figures", "all"):
         figures(a.out, a.fig, a.figcache)

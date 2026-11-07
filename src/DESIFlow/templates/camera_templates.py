@@ -97,9 +97,9 @@ def figure(out, figdir, cachedir):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("stage", choices=["sweep", "figure"]); ap.add_argument("--out", required=True); ap.add_argument("--fig", default=None); ap.add_argument("--figcache", default=None)
-    ap.add_argument("--cams", default="b,r,z"); ap.add_argument("--ks", default=None)
+    ap.add_argument("--cams", default="b,r,z"); ap.add_argument("--ks", default=None); ap.add_argument("--steps", type=int, default=1500); ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     if a.stage == "figure":
         figure(a.out, a.fig, a.figcache); raise SystemExit
     for c in a.cams.split(","):
-        sweep_camera(c, a.out, ks=[int(x) for x in a.ks.split(",")] if a.ks else KS)
+        sweep_camera(c, a.out, ks=[int(x) for x in a.ks.split(",")] if a.ks else KS, steps=a.steps, seed=a.seed)

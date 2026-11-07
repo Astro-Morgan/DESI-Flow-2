@@ -205,3 +205,27 @@ Instrument + sky therefore carries about 87% of the full group's gain. Training 
 terms (vs A 1.351: -0.013 +- 0.007); F (instrument + sky) 1.312 evaluated with both (vs A 1.326: -0.014 +- 0.008; vs C with the full group 1.292: +0.021 +- 0.018, not
 significant). Templates trained with the simplified group depend less on it (plain fit E 1.49, F 1.55, against 1.68 for C). Instrument-only training is the
 simplest option that stays within about 1 sigma of the full group when sky is added at inference.
+
+## Dense K sweeps, spline K selection and final templates (k_selection.py)
+
+Full retrain from scratch (cache/sky_templates_v2/seed0-2; same recipe: 1500 steps, whitened masked-denoising chi2): per-camera instrument templates for
+K = 1..32 (every integer), 34, 36, 40, 44, 48; sky templates (VAC, assumed weights) K = 1..32, 34..48 step 2, 56, 64, 72, 80, 96, 112, 128; three training seeds
+(seed scatter 0.5e-4 to 1.5e-4 in chi2, far below the hold-out row standard error of 1.2e-3, 6e-3 for r). A cubic smoothing B-spline in ln K (weights 1/error, s = number of
+points) is fitted to the seed-mean hold-out chi2; K* = its minimum; uncertainty = paired bootstrap over hold-out rows (the same rows for every K, per-row chi2 cached).
+
+| group | K* (spline minimum) | bootstrap 16-84% | chi2 at K* | zero model |
+|---|---|---|---|---|
+| camera b | 5 (5.2) | 5.1-5.2 | 0.9014 | 0.9318 |
+| camera r | 5 (4.6) | 4.5-4.7 | 0.9282 | 0.9830 |
+| camera z | 11 (11.4) | 11.0-11.7 | 0.9680 | 1.1046 |
+| sky | 108 | 80-128 | 0.348 | 288.9 |
+
+The instrument curves are very flat at the minimum (b: K = 3-8 differ by < 0.0005, well below one standard error), so K* is nominal within about +-2 for b and r. Sky has a plateau
+from K ~ 40: the minimum at 108 gains 5% in chi2 over K = 57; knee alternatives (a doubling of K lowers chi2 by less than 20/10/5%): K = 30 / 45 / 57. Final templates were trained
+fresh at K* (seed 100, OUT/final): hold-out hidden chi2 0.9014 (b, K=5), 0.9281 (r, K=5), 0.9682 (z, K=11), sky K=108 0.332 +- 0.027 (in-sample visible 0.185).
+Figures: k_selection, template_fits_instrument, template_fits_sky, templates_instrument_cam, templates_sky (+ caches). Held-out rows (held-out tiles): mean hidden chi2 per row zero model ->
+templates b 0.960 -> 0.879, r 1.040 -> 0.882, z 1.339 -> 0.947 (the gain comes mostly from the heavy tail of rows with large residuals; typical rows barely move). Held-out
+sky spectra (held-out nights): median hidden chi2 161 -> 0.15; median |data - fit| / data on the brightest 10% of pixels about 1.1% (0.3-3.8%); the largest residuals sit on
+the strongest lines (5577, 5890/5896 A), i.e. line-width and shift changes. Template anatomy: b #1 broad level plus the 5577 line, b #2-5 are 3600 A edge terms; r #2/#4 sky-line
+patterns (6300, A-band 6830, OH 7250), r #3 a step near 6750 A, r #5 noise-like; z #1-2 red-tail curvature, z #4 a step near 8700 A, z #3, #5-11 OH-line clusters beyond 9300 A;
+sky #1 smooth continuum, the rest line groups, #15 a single localised line near 4360 A.

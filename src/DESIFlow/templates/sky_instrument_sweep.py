@@ -215,7 +215,7 @@ if __name__ == "__main__":
     ap.add_argument("--cache", default=None); ap.add_argument("--out", required=True)
     ap.add_argument("--fig", default=None); ap.add_argument("--figcache", default=None)
     ap.add_argument("--kinds", default="instrument,sky"); ap.add_argument("--steps", type=int, default=1500)
-    ap.add_argument("--ks", default=None, help="comma list of K for the sweep stage (default: the standard ladder)")
+    ap.add_argument("--ks", default=None, help="comma list of K for the sweep stage (default: the standard ladder)"); ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     kinds = a.kinds.split(",")
     if a.stage in ("prep", "all"):
@@ -225,6 +225,6 @@ if __name__ == "__main__":
             prep_sky(a.out)
     if a.stage in ("sweep", "all"):
         for k in kinds:
-            sweep(k, a.out, ks=[int(x) for x in a.ks.split(",")] if a.ks else KS, steps=a.steps)
+            sweep(k, a.out, ks=[int(x) for x in a.ks.split(",")] if a.ks else KS, steps=a.steps, seed=a.seed)
     if a.stage in ("figures", "all"):
         figures(a.out, a.fig, a.figcache, a.cache)

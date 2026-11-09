@@ -246,3 +246,16 @@ in every camera, on all rows and on the high-score rows; the weighted mode is sl
 (+0.02-0.03). Training from scratch with the terms in the loop diverged (K >= 32: chi2 17-112), not a valid test. Warm start (plain templates, 600 steps, lr 3e-4) with a plain-loss control: with derivative terms K=4/8/12/24/48 reach 4.84 / 1.37 / 0.831 / 0.441 / 0.320;
 the control (plain, 600 more steps) 6.75 / 1.58 / 0.947 / 0.481 / 0.325. The derivative terms are worth 28% / 13% / 12% / 8% / 2% at K = 4 / 8 / 12 / 24 / 48. More important: the extra training alone moves plain K=48 from 0.373 to 0.325, below the plain K=96
 value of the 1500-step sweeps (0.334), so the K* = 108 of the sky sweep is partly a training-length artefact; with longer training K ~ 48 reaches that level. The sweep should be rerun with longer training before the sky K is final.
+
+## Long-training sweeps with patience annealing; per-camera + full-grid sets combined (long_sweep.py, 2026-11-08)
+
+Schedule: AdamW lr 3e-3 halved (best templates restored) when a fixed validation set (rows carved out of the training set) has not improved by 0.02% for 4 checks of 100 steps, stop at lr < 2e-5 or 10,000 steps
+(median 4,200-7,200 steps, i.e. 3-5x the earlier 1500). One seed. Groups: per-camera instrument b, r, z (K = 1..32, 34, 36, 40, 44, 48), instrument templates on the full 7781-pixel grid (K = 1..40, 44, 48, 56, 64), sky (K = 1..32, 34..48 step 2, 56, 64, 72, 80, 96, 112, 128).
+Spline K* (paired bootstrap 16-84%): b 5.2 (5.1-5.3), r 5.6 (5.4-5.8), z 11.8 (11.4-12.1), full grid 18.6 (18.3-19.0), sky 88.9 (87.9-128). Hold-out chi2 at the minimum: b 0.9015, r 0.9281, z 0.9681, full 0.9361 (zero model 1.0143), sky 0.294 (before: 0.348).
+The instrument K* are unchanged by the longer training (b 5, r 5 -> 6, z 11 -> 12; full 16-24 before -> 19); the sky chi2 improved 15% and reaches its plateau at K = 64 (0.295; K = 48 0.330, 56 0.313, 80 0.300, 96 0.301, 128 0.303; 32 0.419, 24 0.476), so the sky K is 64-90 rather than the 108 of the 1500-step sweep.
+
+Combining (full-grid set sliced to each camera, stacked with the camera's own set, orthonormalised; hold-out hidden chi2): per-camera alone b 0.9015 / r 0.9281 / z 0.9682; full grid sliced alone 0.9058 / 0.9374 / 0.9710; combined orthonormal (24 / 25 / 31 dims) 0.9076 / 0.9395 / 0.9749.
+The combination is worse than the per-camera set alone (+0.0061 +- 0.0001, +0.0114 +- 0.0008, +0.0067 +- 0.0001), and adding the sliced full-grid directions one at a time (orthogonal to the camera's span, ordered by energy) increases the hold-out chi2 monotonically
+for m = 1..19 in every camera. Collinearity: principal-angle cosines between the spans > 0.99 for 1 / 1 / 2 directions and > 0.9 for 3 / 4 / 10 (mean cos^2 0.65 / 0.68 / 0.92 for b / r / z), stack condition number 38 / 52 / 71, no singular value below 1e-3 of the largest (nothing is numerically collinear).
+The hold-out score on SKY-fibre rows does not reward cross-camera structure; whether it matters for targets (junction steps, overlap behaviour) is not tested here.
+Figures: long_k_selection, long_combined_collinearity, long_combined_added_dims (+ .npz). Data: cache/sky_templates_v2/long/{seed0,combined}.

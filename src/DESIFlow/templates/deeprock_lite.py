@@ -71,8 +71,9 @@ def order_orthonormal(U, g, om, n=20000, ridge=1e-3):
     return (Vh @ Q.T).contiguous(), S
 
 
-def train_templates(g, om, K, steps=1500, batch=512, lr=3e-3, ridge=1e-3, seed=0, log=None, init=None, mask_kw=None):
-    """g, om: whitened training tensors on the device. Returns the learnable templates U (K, L) and the loss history."""
+def train_templates(g, om, K, steps=1500, batch=512, lr=3e-3, ridge=1e-3, seed=0, log=None, init=None, mask_kw=None, probs=None):
+    """g, om: whitened training tensors on the device. Returns the learnable templates U (K, L) and the loss history.
+    probs: optional (N,) sampling probabilities of the training rows (default uniform)."""
     dev = g.device
     gen = torch.Generator(device=dev).manual_seed(seed)
     U = torch.nn.Parameter(svd_init(g, om, K, seed=seed) if init is None else init.clone())
@@ -80,7 +81,7 @@ def train_templates(g, om, K, steps=1500, batch=512, lr=3e-3, ridge=1e-3, seed=0
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, steps)
     hist = []
     for step in range(steps):
-        idx = torch.randint(0, len(g), (batch,), generator=gen, device=dev)
+        idx = torch.randint(0, len(g), (batch,), generator=gen, device=dev) if probs is None else torch.multinomial(probs, batch, replacement=True, generator=gen)
         hid = span_mask(batch, g.shape[1], gen=gen, device=dev, **(mask_kw or {}))
         loss = masked_chi2(U, g[idx], om[idx], hid, ridge)[0].mean()
         opt.zero_grad(set_to_none=True)

@@ -229,3 +229,20 @@ sky spectra (held-out nights): median hidden chi2 161 -> 0.15; median |data - fi
 the strongest lines (5577, 5890/5896 A), i.e. line-width and shift changes. Template anatomy: b #1 broad level plus the 5577 line, b #2-5 are 3600 A edge terms; r #2/#4 sky-line
 patterns (6300, A-band 6830, OH 7250), r #3 a step near 6750 A, r #5 noise-like; z #1-2 red-tail curvature, z #4 a step near 8700 A, z #3, #5-11 OH-line clusters beyond 9300 A;
 sky #1 smooth continuum, the rest line groups, #15 a single localised line near 4360 A.
+
+## Exploratory follow-ups (2026-11-08): b #1, signal-weighted training, derivative terms (template_diagnostics.py, signal_weighted.py, sky_derivative.py)
+
+**Camera-b template #1 is a solar-type spectrum.** Its high-pass shape has features at Ca K/H (3934/3968 A), the G band and Mg b (sign arbitrary; correlation with Redrock STAR F/G/K templates
+-0.2 to -0.3 because of the line forest) and its coefficient on held-out SKY rows rises with sky brightness: median |c1| 1.9 (dark, n=9494), 7.5 (bright, n=7894), 63.9 (backup, n=2612).
+Consistent with scattered moonlight / twilight (a solar spectrum) whose fibre-to-fibre variation the sky model, fitted to the sky fibres, cannot remove. Not proven against the moon geometry.
+
+**Capture of the global K=20 shapes** (energy-weighted fraction of the global templates inside the per-camera span, template_capture_K20): b 0.60 (K_b=5), 0.62 (8), 0.68 (20); r 0.65 / 0.70 / 0.71; z 0.89 / 0.91 / 0.91. Yet the global K=20 templates restricted to
+a camera and fitted per camera score b 0.906, r 0.938, z 0.971, against 0.905, 0.935, 0.970 for per-camera-trained K=20: the uncaptured structure has no per-camera predictive value.
+
+**Signal-weighted training** (row score e = whole-row zero-model chi2 - 1, noise-only sigma 0.03; 80th percentile 0.00 (b), -0.00 (r), 0.08 (z); 95th 0.10 / 0.17 / 0.61): uniform, score-weighted and top-20%-only training agree within +-0.001 in hold-out chi2 for K = 3..24
+in every camera, on all rows and on the high-score rows; the weighted mode is slightly worse (r +0.005). The information in the tail rows is already used; sampling is not the limit.
+
+**Derivative (shift/width) terms for the sky templates**, priors from the scatter of the unregularised coefficients (shift 0.04-0.09 px, width 0.01-0.05 px^2; sigma 0.07 px / 0.03 px^2): at fit time only, they help at small K (K=4: 6.74 -> 5.26, K=8 1.58 -> 1.42, K=12 0.958 -> 0.942) and hurt from K=16
+(+0.02-0.03). Training from scratch with the terms in the loop diverged (K >= 32: chi2 17-112), not a valid test. Warm start (plain templates, 600 steps, lr 3e-4) with a plain-loss control: with derivative terms K=4/8/12/24/48 reach 4.84 / 1.37 / 0.831 / 0.441 / 0.320;
+the control (plain, 600 more steps) 6.75 / 1.58 / 0.947 / 0.481 / 0.325. The derivative terms are worth 28% / 13% / 12% / 8% / 2% at K = 4 / 8 / 12 / 24 / 48. More important: the extra training alone moves plain K=48 from 0.373 to 0.325, below the plain K=96
+value of the 1500-step sweeps (0.334), so the K* = 108 of the sky sweep is partly a training-length artefact; with longer training K ~ 48 reaches that level. The sweep should be rerun with longer training before the sky K is final.

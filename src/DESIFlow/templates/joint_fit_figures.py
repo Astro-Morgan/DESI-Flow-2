@@ -23,8 +23,8 @@ def make(root, phys_dir, cache, legacy, figdir, cachedir):
     # ---------------------------------------------------------------- per-object figures
     for n, o in enumerate(objs):
         d = co[f"o{n}"]; r = res[n]; g = d["w"] > 0; lam = jd.LAM
-        fits = jd.fit_object(fid, o["z"], o["f"], o["w"], parts_list=(("phys", "inst", "sky"),))[("phys", "inst", "sky")]
-        zi = np.abs(fits["theta"][fits["tag"] == "inst"]) / fid.prior_inst; zs = np.abs(fits["theta"][fits["tag"] == "sky"]) / fid.prior_sky
+        fits = jd.fit_object(fid, o["z"], o["f"], o["w"], prog=o["prog"], parts_list=(("phys", "inst", "sky"),))[("phys", "inst", "sky")]
+        zi = fid.zscore(fits["theta"][fits["tag"] == "inst"], o["prog"]); zs = np.abs(fits["theta"][fits["tag"] == "sky"]) / fid.prior_sky
         fig, ax = plt.subplots(4, 1, figsize=(18, 15), sharex=True)
         sm = jd.nw(d["f"], d["w"], 6.0); ax[0].plot(lam[g], d["f"][g], color="0.75", lw=0.4, label="raw flux (masked pixels omitted)"); ax[0].plot(lam, sm, color="k", lw=1.0, label="raw flux, NW smooth (sigma 6 px)")
         ax[0].plot(lam, jd.nw(d["phys_only"], np.ones(jd.L), 1.0), color="tab:blue", lw=1.0, label=f"legacy-physical-only fit to the raw flux (chi2/px {r['chi2_per_pix']['phys']:.2f})")
@@ -40,7 +40,7 @@ def make(root, phys_dir, cache, legacy, figdir, cachedir):
         ax[3].plot(lam, jd.nw(d["inst"] + d["sky"], np.ones(jd.L), 6.0), color="tab:orange", lw=0.9, ls=":", label="instrument + sky fitted part (smoothed)"); ax[3].axhline(0, color="gray", lw=0.6); ax[3].legend(fontsize=8, ncol=3, loc="upper right")
         lim = np.nanpercentile(np.abs(jd.nw(d["f"] - d["phys_only"], d["w"], 6.0)), 99) * 1.4; ax[3].set_ylim(-lim, lim); ax[3].set_ylabel("residual [1e-17 erg/s/cm2/A]"); ax[3].set_xlabel("observed wavelength [Angstrom]")
         ax[0].set_title(f"{o['kind']} z = {o['z']:.3f}, median S/N {o['snr']:.1f}, Redrock chi2/px {o['rr']:.2f}; chi2/px physical-only {r['chi2_per_pix']['phys']:.2f} -> +instrument {r['chi2_per_pix']['phys+inst']:.2f}, +sky {r['chi2_per_pix']['phys+sky']:.2f}, joint {r['chi2_per_pix']['joint']:.2f}; "
-                        f"median |coefficient|/prior sigma: instrument {np.median(zi):.1f}, sky {np.median(zs):.1f}", fontsize=9)
+                        f"instrument prior {"Student-t, program " + o["prog"] if jd.USE_T and fid.t_priors else "old diagonal"}; median |coefficient - location|/scale: instrument {np.median(zi):.1f}, sky {np.median(zs):.1f}", fontsize=9)
         fig.tight_layout(); fig.savefig(os.path.join(figdir, f"joint_fit_object_{n}.png"), dpi=100); plt.close(fig)
         np.savez(os.path.join(cachedir, f"joint_fit_object_{n}.npz"), wavelength_A=lam, z=o["z"], snr=o["snr"], **{k: v for k, v in d.items() if isinstance(v, np.ndarray)}, inst_zscore=zi, sky_zscore=zs)
     # ---------------------------------------------------------------- energy figure
@@ -56,12 +56,14 @@ def make(root, phys_dir, cache, legacy, figdir, cachedir):
     snr = np.array([p["snr"] for p in P]); psh = np.array([p["shares"] for p in P]) * 100
     ax[1, 0].scatter(snr, psh[:, 1], s=8, color=COL["inst"], label="instrument"); ax[1, 0].scatter(snr, psh[:, 2], s=8, color=COL["sky"], label="sky"); ax[1, 0].set_xscale("log"); ax[1, 0].set_yscale("log"); ax[1, 0].set_xlabel("median S/N of the spectrum")
     ax[1, 0].set_ylabel("share of the model energy [percent]"); ax[1, 0].legend(fontsize=8); ax[1, 0].set_title(f"{len(P)} random held-out galaxies", fontsize=9)
-    zz = [np.abs(jd.fit_object(fid, o["z"], o["f"], o["w"], parts_list=(("phys", "inst", "sky"),))[("phys", "inst", "sky")]["theta"]) for o in objs]; tg = jd.fit_object(fid, objs[0]["z"], objs[0]["f"], objs[0]["w"], parts_list=(("phys", "inst", "sky"),))[("phys", "inst", "sky")]["tag"]
-    ax[1, 1].boxplot([np.log10(z[tg == "inst"] / fid.prior_inst) for z in zz], tick_labels=lab, showfliers=False); ax[1, 1].axhline(0, color="gray", ls=":"); ax[1, 1].tick_params(axis="x", labelsize=7)
-    ax[1, 1].set_ylabel("log10( |instrument coefficient| / prior sigma )"); ax[1, 1].set_title("instrument coefficients against their prior (0 = typical SKY-row scatter)", fontsize=9)
+    zz = []
+    for o in objs:
+        ft = jd.fit_object(fid, o["z"], o["f"], o["w"], prog=o["prog"], parts_list=(("phys", "inst", "sky"),))[("phys", "inst", "sky")]; zz.append(fid.zscore(ft["theta"][ft["tag"] == "inst"], o["prog"]))
+    ax[1, 1].boxplot([np.log10(z) for z in zz], tick_labels=lab, showfliers=False); ax[1, 1].axhline(0, color="gray", ls=":"); ax[1, 1].tick_params(axis="x", labelsize=7)
+    ax[1, 1].set_ylabel("log10( |instrument coefficient - prior location| / prior scale )"); ax[1, 1].set_title("instrument coefficients against the empirical prior of their observing program (0 = one prior scale)", fontsize=9)
     fig.tight_layout(); fig.savefig(os.path.join(figdir, "joint_fit_energy.png"), dpi=120); plt.close(fig)
     np.savez(os.path.join(cachedir, "joint_fit_energy.npz"), objects=np.array(lab), shares=sh, energy_per_pix=np.array([[r["energy_per_pix"][c] for c in ("phys", "inst", "sky")] for r in res]), chi2_gain=gain, pop_snr=snr, pop_shares=psh,
-             pop_per_pix=np.array([p["per_pix"] for p in P]), inst_zscore_log10=np.array([np.median(np.log10(z[tg == "inst"] / fid.prior_inst)) for z in zz]))
+             pop_per_pix=np.array([p["per_pix"] for p in P]), inst_zscore_log10=np.array([np.median(np.log10(z)) for z in zz]))
     # ---------------------------------------------------------------- physical change figure
     fig, ax = plt.subplots(2, 2, figsize=(16, 11)); cache_c = {}
     dm = np.array([p["dmodel"] for p in P]); ax[0, 0].scatter(snr, 100 * dm, s=8); ax[0, 0].set_xscale("log"); ax[0, 0].set_xlabel("median S/N"); ax[0, 0].set_ylabel("change of the physical model, joint vs physical-only fit [percent of its norm]")
@@ -76,14 +78,14 @@ def make(root, phys_dir, cache, legacy, figdir, cachedir):
     ax[0, 1].set_xticks(range(3)); ax[0, 1].set_xticklabels([n for _, n in names]); ax[0, 1].axhline(0, color="k", lw=0.8); ax[0, 1].set_ylabel("paired change of the hidden-pixel chi2 per pixel vs physical-only (negative = better)"); ax[0, 1].set_title(f"{len(P)} galaxies, 36 hidden spans, fit on visible pixels only (mean of the unweighted per-galaxy chi2)", fontsize=9)
     sel = ig[:3]; w_ = 0.27
     for k, n in enumerate(sel):
-        o = objs[n]; pr = jd.fit_object(fid, o["z"], o["f"], o["w"], parts_list=(("phys",), ("phys", "inst", "sky")))
+        o = objs[n]; pr = jd.fit_object(fid, o["z"], o["f"], o["w"], prog=o["prog"], parts_list=(("phys",), ("phys", "inst", "sky")))
         c0 = pr[("phys",)]["theta"]; c1 = pr[("phys", "inst", "sky")]["theta"][pr[("phys", "inst", "sky")]["tag"] == "phys"]; s = np.abs(c0).max()
         ax[1, 0].bar(np.arange(32) + (k - 1) * w_, (c1 - c0) / s * 100, w_, label=f"{o['kind']} z={o['z']:.2f}"); cache_c[f"dcoef_{n}"] = (c1 - c0) / s
     ax[1, 0].set_xlabel("legacy template number"); ax[1, 0].set_ylabel("coefficient change, joint - physical-only [percent of the largest physical-only coefficient]"); ax[1, 0].legend(fontsize=8); ax[1, 0].set_title("legacy template coefficients: joint fit vs physical-only fit", fontsize=9)
     for n, col in zip(ig[:3] + iq[:1] + ic, ("tab:blue", "tab:green", "tab:orange", "tab:red", "tab:gray")):
         o = objs[n]; zg = o["z"] + np.linspace(-0.004, 0.004, 41) * (1 + o["z"]); cl = co[f"o{n}"]["clean"]; c_raw, c_cl, c_j = [], [], []
         for z in zg:
-            fr = jd.fit_object(fid, z, o["f"], o["w"], parts_list=(("phys",), ("phys", "inst", "sky")))
+            fr = jd.fit_object(fid, z, o["f"], o["w"], prog=o["prog"], parts_list=(("phys",), ("phys", "inst", "sky")))
             c_raw.append(jd.chi2(o["f"], fr[("phys",)]["model"], o["w"])[0]); c_j.append(jd.chi2(o["f"], fr[("phys", "inst", "sky")]["model"], o["w"])[0])
             c_cl.append(jd.chi2(cl, jd.fit_object(fid, z, cl, o["w"], parts_list=(("phys",),))[("phys",)]["model"], o["w"])[0])
         dz = (zg - o["z"]) / (1 + o["z"]) * 3e5; lbl = f"{o['kind']} z={o['z']:.2f}"
@@ -105,14 +107,14 @@ def make_bounded(root, phys_dir, cache, legacy, figdir, cachedir, ks=(3.0, 10.0)
     fid, objs, co, res, P, show = jd.run(root, phys_dir, cache, legacy, figdir, cachedir)
     out, cache_c = [], {}; ig = [n for n, o in enumerate(objs) if o["kind"] == "galaxy"]; iq = [n for n, o in enumerate(objs) if o["kind"] == "QSO"]; ic = [n for n, o in enumerate(objs) if o["kind"] == "contaminant"]
     for n, o in enumerate(objs):
-        X, prec, tag = fid.columns(o["z"], ("phys", "inst", "sky")); sig = np.concatenate([np.full((tag == "phys").sum(), np.inf), np.maximum(fid.prior_inst, 1e-12), np.maximum(fid.prior_sky, 1e-12)])
+        X, prec, tag = fid.columns(o["z"], ("phys", "inst", "sky")); mu_i, sc_i = fid.center_scale(o["prog"]); mu = np.concatenate([np.zeros((tag == "phys").sum()), mu_i, np.zeros((tag == "sky").sum())]); sig = np.concatenate([np.full((tag == "phys").sum(), np.inf), np.maximum(sc_i, 1e-12), np.maximum(fid.prior_sky, 1e-12)])
         sw = np.sqrt(o["w"]); A = (X * sw[None]).T; b = sw * o["f"]; npx = int((o["w"] > 0).sum()); row = dict(kind=o["kind"], z=o["z"], snr=o["snr"])
         p_only = jd.fit_object(fid, o["z"], o["f"], o["w"], parts_list=(("phys",),))[("phys",)]; chi0 = jd.chi2(o["f"], p_only["model"], o["w"])[0]
         for k in ks:
-            lo = np.where(np.isinf(sig), -np.inf, -k * sig); hi = np.where(np.isinf(sig), np.inf, k * sig); sol = lsq_linear(A, b, bounds=(lo, hi), method="bvls", max_iter=500); th = sol.x
+            lo = np.where(np.isinf(sig), -np.inf, mu - k * sig); hi = np.where(np.isinf(sig), np.inf, mu + k * sig); sol = lsq_linear(A, b, bounds=(lo, hi), method="bvls", max_iter=500); th = sol.x
             comp = {t: th[tag == t] @ X[tag == t] for t in ("phys", "inst", "sky")}; m = sum(comp.values()); E = {t: float((o["w"] * comp[t] ** 2).sum()) for t in comp}
             row[f"k{k:g}"] = dict(chi2_per_pix=jd.chi2(o["f"], m, o["w"])[0] / npx, chi2_reduction=1 - jd.chi2(o["f"], m, o["w"])[0] / chi0, share={t: E[t] / sum(E.values()) for t in E}, inst_peak_flux=float(np.abs(comp["inst"]).max()),
-                                  at_bound_inst=float((np.abs(th[tag == "inst"]) > 0.999 * k * fid.prior_inst).mean()), at_bound_sky=float((np.abs(th[tag == "sky"]) > 0.999 * k * fid.prior_sky).mean()))
+                                  at_bound_inst=float((np.abs(th[tag == "inst"] - mu_i) > 0.999 * k * sc_i).mean()), at_bound_sky=float((np.abs(th[tag == "sky"]) > 0.999 * k * fid.prior_sky).mean()))
             cache_c[f"o{n}_k{k:g}_inst"] = comp["inst"]; cache_c[f"o{n}_k{k:g}_sky"] = comp["sky"]; cache_c[f"o{n}_k{k:g}_phys"] = comp["phys"]
         row["free_prior"] = dict(chi2_per_pix=res[n]["chi2_per_pix"]["joint"], chi2_reduction=1 - res[n]["chi2_per_pix"]["joint"] / res[n]["chi2_per_pix"]["phys"], share=res[n]["share_of_model_energy"], inst_peak_flux=float(np.abs(co[f"o{n}"]["inst"]).max()))
         row["physical_only_chi2_per_pix"] = chi0 / npx; out.append(row)

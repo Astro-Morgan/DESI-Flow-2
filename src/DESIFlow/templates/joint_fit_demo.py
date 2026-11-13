@@ -55,6 +55,22 @@ class Fiducial:
         self.inst = np.array(cols); self.inst_kind = np.array(kinds)
         self.sky = np.load(os.path.join(root, "long", "seed0", "sky", f"K{K_SKY:03d}.npz"))["templates_flux"].astype(np.float64)
         self.prior_inst, self.prior_sky = self._priors(root)
+        self.t_priors, self.t_center, self.t_scale = {}, {}, {}                    # empirical Student-t prior of the instrument coefficients per observing program (instrument_prior.py --t)
+        tp = os.path.join(root, "instrument_prior_t.npz")
+        if os.path.exists(tp):
+            zt = np.load(tp)
+            for q in ("dark", "bright", "backup", "all"):
+                if f"mu_{q}" in zt.files:
+                    self.t_priors[q] = (zt[f"mu_{q}"], np.linalg.inv(zt[f"S_{q}"]), float(zt[f"nu_{q}"])); self.t_center[q] = zt[f"mu_{q}"]; self.t_scale[q] = np.sqrt(np.diag(zt[f"S_{q}"]))
+
+    def center_scale(self, prog):
+        """location and scale of the instrument-coefficient prior of a program (the Student-t fit; falls back to zero and the old sigma)."""
+        if USE_T and self.t_priors:
+            q = prog if prog in self.t_priors else "all"; return self.t_center[q], self.t_scale[q]
+        return np.zeros(len(self.prior_inst)), self.prior_inst
+
+    def zscore(self, theta_inst, prog):
+        mu, sc = self.center_scale(prog); return np.abs(theta_inst - mu) / sc
 
     def _priors(self, root):
         import torch
@@ -91,6 +107,7 @@ class Fiducial:
         return np.vstack(X), np.concatenate(prec), np.array(tag)
 
 
+USE_T = True           # instrument-coefficient prior: the empirical Student-t per observing program (False: the old zero-mean diagonal Gaussian)
 NONNEG = True          # standing rule (user, 2026-11-12): the cumulative physical model must be >= 0 at every pixel
 
 
@@ -128,8 +145,10 @@ def wls(X, prec, tag, f, w, ridge_phys=1e-6, nonneg=None, inst_prior=None, irls=
     return th, m
 
 
-def fit_object(fid, z, f, w, nonneg=None, inst_prior=None, parts_list=(("phys",), ("phys", "inst"), ("phys", "sky"), ("phys", "inst", "sky")), hidden=None, sky_scale=1.0):
+def fit_object(fid, z, f, w, nonneg=None, inst_prior=None, prog=None, parts_list=(("phys",), ("phys", "inst"), ("phys", "sky"), ("phys", "inst", "sky")), hidden=None, sky_scale=1.0):
     """fits for each part set; returns dict parts -> (theta, tag, model, per-tag models). hidden: bool mask excluded from the fit."""
+    if inst_prior is None and prog is not None and USE_T and fid.t_priors:
+        inst_prior = fid.t_priors.get(prog, fid.t_priors["all"])
     wf = w * (~hidden if hidden is not None else 1.0); out = {}
     for parts in parts_list:
         X, prec, tag = fid.columns(z, parts, sky_scale); th, m = wls(X, prec, tag, f, wf, nonneg=nonneg, inst_prior=inst_prior if "inst" in parts else None)
@@ -140,6 +159,12 @@ def fit_object(fid, z, f, w, nonneg=None, inst_prior=None, parts_list=(("phys",)
 def chi2(f, m, w, mask=None):
     sel = (w > 0) if mask is None else ((w > 0) & mask)
     return float((w * (f - m) ** 2)[sel].sum()), int(sel.sum())
+
+
+def programs_of_cache_rows(cache, rows):
+    """observing program (dark / bright / backup / other) of the tiles of target cache rows."""
+    tr = np.load(os.path.join(cache, "index", "tgt_rows.npy")); gs = np.load(os.path.join(cache, "index", "group_start.npy")); pg = np.load(os.path.join(cache, "index", "group_program.npy"))
+    return np.array([str(pg[g]).strip() for g in np.searchsorted(gs, tr[np.asarray(rows)], side="right") - 1])
 
 
 def load_objects(phys_dir, cache, n_pop=300, seed=1, chi_max=1.3):
@@ -164,7 +189,7 @@ def load_qsos(cache, n=2, seed=0):
     rrq = d["CHI2"] / (7958.0 * 0.97); good &= rrq < 2.5
     s = np.flatnonzero(good); pick = s[np.argsort(snr[cand[s]])[-n:]]
     flux, ivar, mask = (np.load(os.path.join(cache, "tgt", f"{k}.npy"), mmap_mode="r") for k in ("flux", "ivar", "mask")); rows = cand[pick]
-    return [dict(f=np.asarray(flux[r], np.float64), w=np.asarray(np.where(mask[r] == 0, ivar[r], 0.0), np.float64), z=float(d["Z"][i]), snr=float(snr[r]), kind="QSO", rr=float(rrq[i])) for r, i in zip(rows, pick)]
+    return [dict(f=np.asarray(flux[r], np.float64), w=np.asarray(np.where(mask[r] == 0, ivar[r], 0.0), np.float64), z=float(d["Z"][i]), snr=float(snr[r]), kind="QSO", rr=float(rrq[i]), prog=programs_of_cache_rows(cache, [r])[0]) for r, i in zip(rows, pick)]
 
 
 def run(root, phys_dir, cache, legacy, figdir, cachedir, use_R=False):
@@ -172,16 +197,16 @@ def run(root, phys_dir, cache, legacy, figdir, cachedir, use_R=False):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from DESIFlow.data.target_nuisance_test import span_mask
-    fid = Fiducial(root, phys_dir, legacy, use_R=use_R); F, W, Z, SNR, CR, show, pop, con, RR = load_objects(phys_dir, cache)
-    objs = [dict(f=np.asarray(F[i], np.float64), w=np.asarray(W[i], np.float64), z=float(Z[i]), snr=float(SNR[i]), kind="galaxy", rr=float(RR[i])) for i in show] + load_qsos(cache) \
-        + [dict(f=np.asarray(F[con], np.float64), w=np.asarray(W[con], np.float64), z=float(Z[con]), snr=float(SNR[con]), kind="contaminant", rr=float(RR[con]))]
+    fid = Fiducial(root, phys_dir, legacy, use_R=use_R); F, W, Z, SNR, CR, show, pop, con, RR = load_objects(phys_dir, cache); PR = programs_of_cache_rows(cache, CR)
+    objs = [dict(f=np.asarray(F[i], np.float64), w=np.asarray(W[i], np.float64), z=float(Z[i]), snr=float(SNR[i]), kind="galaxy", rr=float(RR[i]), prog=PR[i]) for i in show] + load_qsos(cache) \
+        + [dict(f=np.asarray(F[con], np.float64), w=np.asarray(W[con], np.float64), z=float(Z[con]), snr=float(SNR[con]), kind="contaminant", rr=float(RR[con]), prog=PR[con])]
     res, cache_out = [], {}
     for n, o in enumerate(objs):
-        fits = fit_object(fid, o["z"], o["f"], o["w"]); j = fits[("phys", "inst", "sky")]; p = fits[("phys",)]; good = o["w"] > 0
+        fits = fit_object(fid, o["z"], o["f"], o["w"], prog=o["prog"]); j = fits[("phys", "inst", "sky")]; p = fits[("phys",)]; good = o["w"] > 0
         E = {c: float((o["w"] * j["comp"][c] ** 2).sum()) for c in ("phys", "inst", "sky")}; Ed = float((o["w"] * o["f"] ** 2).sum()); npx = int(good.sum())
         chis = {"phys": chi2(o["f"], p["model"], o["w"])[0], "phys+inst": chi2(o["f"], fits[("phys", "inst")]["model"], o["w"])[0], "phys+sky": chi2(o["f"], fits[("phys", "sky")]["model"], o["w"])[0], "joint": chi2(o["f"], j["model"], o["w"])[0]}
         clean = o["f"] - j["comp"]["inst"] - j["comp"]["sky"]
-        refit = fit_object(fid, o["z"], clean, o["w"], parts_list=(("phys",),))[("phys",)]
+        refit = fit_object(fid, o["z"], clean, o["w"], prog=o["prog"], parts_list=(("phys",),))[("phys",)]
         dm = float(np.sqrt((o["w"] * (refit["comp"]["phys"] - p["comp"]["phys"]) ** 2).sum() / (o["w"] * p["comp"]["phys"] ** 2).sum()))
         ident = float(np.abs(refit["theta"] - j["theta"][j["tag"] == "phys"]).max() / np.abs(j["theta"][j["tag"] == "phys"]).max())
         res.append(dict(kind=o["kind"], z=o["z"], snr=o["snr"], npix=npx, energy_per_pix={c: E[c] / npx for c in E}, data_energy_per_pix=Ed / npx, share_of_model_energy={c: E[c] / sum(E.values()) for c in E},
@@ -193,8 +218,8 @@ def run(root, phys_dir, cache, legacy, figdir, cachedir, use_R=False):
     for i in pop:
         f, w, z = np.asarray(F[i], np.float64), np.asarray(W[i], np.float64), float(Z[i])
         if (w > 0).sum() < 4000: continue
-        fits = fit_object(fid, z, f, w); j = fits[("phys", "inst", "sky")]; E = {c: float((w * j["comp"][c] ** 2).sum()) for c in ("phys", "inst", "sky")}
-        hid = span_mask(L, np.random.default_rng(int(i))); ft = fit_object(fid, z, f, w, hidden=hid); sel = hid & (w > 0)
+        fits = fit_object(fid, z, f, w, prog=PR[i]); j = fits[("phys", "inst", "sky")]; E = {c: float((w * j["comp"][c] ** 2).sum()) for c in ("phys", "inst", "sky")}
+        hid = span_mask(L, np.random.default_rng(int(i))); ft = fit_object(fid, z, f, w, hidden=hid, prog=PR[i]); sel = hid & (w > 0)
         h = {"+".join(k): float((w * (f - v["model"]) ** 2)[sel].sum() / max(sel.sum(), 1)) for k, v in ft.items()}
         p0 = fits[("phys",)]["comp"]["phys"]; dm = float(np.sqrt((w * (j["comp"]["phys"] - p0) ** 2).sum() / (w * p0 ** 2).sum()))
         P.append(dict(snr=float(SNR[i]), z=z, shares=[E[c] / sum(E.values()) for c in ("phys", "inst", "sky")], per_pix=[E[c] / (w > 0).sum() for c in ("phys", "inst", "sky")], hidden=h, dmodel=dm))
@@ -205,11 +230,13 @@ def run(root, phys_dir, cache, legacy, figdir, cachedir, use_R=False):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--root", required=True); ap.add_argument("--phys", required=True); ap.add_argument("--cache", required=True); ap.add_argument("--legacy", required=True)
-    ap.add_argument("--fig", required=True); ap.add_argument("--figcache", required=True); ap.add_argument("--bounded", action="store_true"); ap.add_argument("--no-nonneg", action="store_true")
+    ap.add_argument("--fig", required=True); ap.add_argument("--figcache", required=True); ap.add_argument("--bounded", action="store_true"); ap.add_argument("--no-nonneg", action="store_true"); ap.add_argument("--old-prior", action="store_true")
     a = ap.parse_args()
+    from DESIFlow.templates import joint_fit_demo as _jd
     if a.no_nonneg:
-        from DESIFlow.templates import joint_fit_demo as _jd
         _jd.NONNEG = False
+    if a.old_prior:
+        _jd.USE_T = False
     from DESIFlow.templates import joint_fit_figures as figs
     if a.bounded:
         figs.make_bounded(a.root, a.phys, a.cache, a.legacy, a.fig, a.figcache); raise SystemExit

@@ -259,3 +259,38 @@ The combination is worse than the per-camera set alone (+0.0061 +- 0.0001, +0.01
 for m = 1..19 in every camera. Collinearity: principal-angle cosines between the spans > 0.99 for 1 / 1 / 2 directions and > 0.9 for 3 / 4 / 10 (mean cos^2 0.65 / 0.68 / 0.92 for b / r / z), stack condition number 38 / 52 / 71, no singular value below 1e-3 of the largest (nothing is numerically collinear).
 The hold-out score on SKY-fibre rows does not reward cross-camera structure; whether it matters for targets (junction steps, overlap behaviour) is not tested here.
 Figures: long_k_selection, long_combined_collinearity, long_combined_added_dims (+ .npz). Data: cache/sky_templates_v2/long/{seed0,combined}.
+
+## Joint fit of the 32 legacy templates with the fiducial instrument + sky templates on DR2 spectra (joint_fit_demo.py, joint_fit_figures.py, 2026-11-12; corrected)
+
+Fiducial sets: per-camera instrument b K=5, r K=6, z K=12 (long-trained, times the overlap ramps) and sky K=64; legacy physical templates `Legacy/k32_final.pt` (32 x 13903, rest log10 lambda 400-9824 A, 1e-4 dex; linear interpolation at lambda/(1+z), catalogue z;
+the mean resolution matrix changes chi2 by < 2%, so none is applied: the templates were trained on data already at instrument resolution). Priors: instrument = robust SKY-row coefficient scatter, sky = 1% of the VAC coefficient scatter, physical ridge negligible.
+
+**Sample correction.** A first version of this section used the top-S/N galaxy of each z bin of the physical-template hold-out set; those were mislabelled M/L/T dwarfs (Redrock chi2/px 46-1272, the zall SPECTYPE is GALAXY with ZWARN = 0 and DELTACHI2 > 100). In the 8000-spectrum hold-out set 5% have a Redrock chi2/px > 1.5, 0.6% > 3,
+and none of the 64 spectra with median S/N > 30 has chi2/px < 1.4. The conclusions drawn from those objects (instrument terms absorbing the misfit of the legacy templates on "bright galaxies") were true only for contaminants and are withdrawn for galaxies. The demonstration now uses only spectra with Redrock chi2/px < 1.3 (galaxies; QSOs < 2.5)
+and keeps one contaminant as a control.
+
+Galaxies (S/N 4-22, Redrock chi2/px 1.2-1.3) and QSOs (S/N 37-38), free-prior joint fit: instrument share of the model energy 0.0 / 0.0 / 0.8 / 2.0 / 23.9 (S/N 4, tiny model energy) / 1.1 % for the six galaxies and 0.0 / 0.1 % for the QSOs; chi2 reduction from the instrument templates 1.1, 1.1, 12.5, 3.2, 4.5, 1.5 % (galaxies), 2.7 and 9.9 % (QSOs); sky <= 0.9% (energy share
+1e-4 percent or less). The instrument coefficients are 0.1-0.9 of their prior sigma (median |d|/sigma 0.15-0.35): within the range the SKY rows show, and bounding them to +-3 sigma changes nothing (no coefficient at the bound). 300 random clean held-out galaxies (S/N 4-19, median 5.5): instrument share median 0.15% (mean 0.4%, 90th percentile 1.0%, max 8%), sky 3e-4 percent (max 0.006%);
+the physical model moves by a median of 3.5% of its norm (90th percentile 9%, max 25%) between the physical-only fit to the raw flux and the physical refit to the cleaned flux (the refit reproduces the joint physical coefficients to 1e-13: the joint normal equations contain the refit); hidden-pixel test (36 spans, fit on visible pixels): + instrument -0.0129 +- 0.0036 chi2/px (1.1%, 70% of galaxies improve), + sky -0.0011 +- 0.0002 (77% improve),
+both -0.0128 +- 0.0036. Redshift scan (60 km/s grid): minima move by at most 60-180 km/s for the clean objects (0 for two of them).
+Largest galaxy effect: z = 0.33, S/N 12.7: the instrument component is a smooth additive level of 2-3 (1e-17 erg/s/cm2/A) in b falling to ~0.5 in z, i.e. as large as the blue flux itself (3-5), and lowers the physical-only chi2/px from 1.61 to 1.40; whether that is instrument signal or legacy-template mismatch cannot be separated by this fit.
+Control, the contaminant (z = 0.47 dwarf, S/N 252, Redrock chi2/px 1272): instrument share 12%, coefficients 15-900 sigma, chi2/px 2113 -> 893, a stepped plateau of 30-700 absorbing the misfit; bounded to +-3 sigma the share is 0 and chi2/px 2073: the signature of a wrong physical model.
+Figures: joint_fit_object_0..8 (raw, smoothed, template components, cleaned flux, residuals; object 8 = contaminant), joint_fit_energy, joint_fit_physical_change, joint_fit_bounded (+ .npz).
+
+## Contamination caveat for earlier results (2026-11-12)
+
+The galaxy samples of (a) the physical-template experiment (60,000 / 8,000 spectra, ZWARN = 0, DELTACHI2 > 100, snr_med > 4) and (b) the target-residual test (3,000 galaxies, snr_med > 8, DELTACHI2 > 500) were not filtered for stellar contaminants labelled GALAXY; the bright end is dominated by them (all 64 hold-out spectra with S/N > 30). Their chi2 means (including the baseline 4.79 of the target test) and the paired gains are heavy-tail sensitive
+and were not re-run on a Redrock-chi2/px-clean sample. The sky and instrument template sweeps (SKY rows, VAC spectra) are unaffected.
+
+### Degeneracy between the instrument and the physical part (object 5, galaxy z = 0.205, S/N 5.6; 2026-11-12)
+
+4000-5000 A mean flux: data 2.36, physical-only fit 2.24, joint physical component 0.78, instrument component +1.56 +- 0.18 (posterior from the joint normal matrix with the priors), sky 0.01; the posterior correlation between the instrument and the physical band means is -0.93 and their sum is 2.34 +- 0.07:
+the data fix the total, not the split. At 3600-4000 A the joint physical component is negative (-0.39) against an instrument component of +2.22. The SKY rows show a median 4000-5000 A level of -0.85 (5-95%: -5.6 to +1.5; 53% have |mean| > 1), so the amplitude is within the sky-fibre range but the sign is opposite to the typical sky-fibre
+residual. The cleaned flux in the blue of such a faint object is therefore not a measurement of the instrument; it is a prior-driven partition (the chi2 gain is 1.5%). Ways to break it: non-negativity of the physical part, instrument priors from target fibres or an exposure-level link, a joint fit over the targets of one exposure/petal.
+
+### Standing rule: the cumulative physical model must be non-negative (user, 2026-11-12)
+
+Implemented in `joint_fit_demo.wls` (default on): the inequality-constrained quadratic program (physical model >= 0 at all 7781 observed pixels) is solved through its dual, a non-negative least-squares problem (no QP package in the environment). The refit-equals-joint identity still holds (same KKT conditions).
+Effect on the clean sample: the constraint is inactive for most galaxies and binds in 37 of the 300 random galaxies (S/N ~5; median 0.6% of pixels would be negative, max 7.9%) and moves the physical component by a median 0.6% of its norm (max 3.5%); the 300-galaxy means are unchanged (instrument share median 0.15%; hidden-pixel gain
+-0.0129 +- 0.0035 chi2/px). Object 5 (z = 0.205, S/N 5.6): the unconstrained joint physical component reached -1.2e-17 (5.9% of pixels negative); constrained, the 4000-5000 A mean splits as physical 1.30 / instrument 1.04 (unconstrained 0.78 / 1.56) at chi2/px 1.106 (1.104), and the physical component is pinned at 0 below 4000 A:
+the constraint trims about a third of the instrument offset but the split stays prior-dependent. The dwarf control is also constrained (chi2/px of the physical-only fit rises 2113 -> 2855, joint 893 -> 935). The "bounded" figure (joint_fit_bounded) was made before the rule and uses the unconstrained fit.

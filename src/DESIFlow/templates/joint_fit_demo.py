@@ -94,13 +94,7 @@ class Fiducial:
 NONNEG = True          # standing rule (user, 2026-11-12): the cumulative physical model must be >= 0 at every pixel
 
 
-def wls(X, prec, tag, f, w, ridge_phys=1e-6, nonneg=None):
-    """regularised weighted least squares; with nonneg the cumulative physical model sum_k c_k phi_k is constrained to be >= 0 at every pixel.
-    The inequality-constrained QP  min 1/2 th'A th - b'th  s.t.  G th >= 0  is solved through its dual, a non-negative least squares problem:
-    th = A^-1 (b + G' lam), lam = argmin_{lam >= 0} |A^-1/2 (b + G' lam)|^2  (scipy nnls)."""
-    nonneg = NONNEG if nonneg is None else nonneg
-    Xw = X * w[None]; A = Xw @ X.T; d = np.diag(A).copy(); pp = prec.copy(); pp[tag == "phys"] = ridge_phys * d[tag == "phys"]
-    A[np.diag_indices_from(A)] += pp; b = Xw @ f
+def _solve(A, b, X, tag, nonneg):
     if not nonneg or not (tag == "phys").any():
         th = np.linalg.solve(A, b); return th, th @ X
     ev, V = np.linalg.eigh(A); Ah = (V / np.sqrt(np.maximum(ev, 1e-300))) @ V.T                 # A^-1/2
@@ -113,11 +107,32 @@ def wls(X, prec, tag, f, w, ridge_phys=1e-6, nonneg=None):
     th = np.linalg.solve(A, b + Gt @ lam); return th, th @ X
 
 
-def fit_object(fid, z, f, w, nonneg=None, parts_list=(("phys",), ("phys", "inst"), ("phys", "sky"), ("phys", "inst", "sky")), hidden=None, sky_scale=1.0):
+def wls(X, prec, tag, f, w, ridge_phys=1e-6, nonneg=None, inst_prior=None, irls=10):
+    """regularised weighted least squares; with nonneg the cumulative physical model sum_k c_k phi_k is constrained to be >= 0 at every pixel.
+    The inequality-constrained QP  min 1/2 th'A th - b'th  s.t.  G th >= 0  is solved through its dual, a non-negative least squares problem:
+    th = A^-1 (b + G' lam), lam = argmin_{lam >= 0} |A^-1/2 (b + G' lam)|^2  (scipy nnls).
+    inst_prior = (mu, Sinv, nu): a multivariate Student-t prior on the instrument coefficients (location mu, inverse scatter Sinv, degrees of freedom nu; nu = inf is a Gaussian),
+    fitted by iteratively reweighted least squares (scale mixture: the prior precision is u Sinv with u = (nu + d) / (nu + Mahalanobis^2) updated from the current coefficients)."""
+    nonneg = NONNEG if nonneg is None else nonneg
+    Xw = X * w[None]; A = Xw @ X.T; d = np.diag(A).copy(); pp = prec.copy(); pp[tag == "phys"] = ridge_phys * d[tag == "phys"]
+    if inst_prior is not None:
+        pp[tag == "inst"] = 0.0
+    A[np.diag_indices_from(A)] += pp; b = Xw @ f
+    if inst_prior is None:
+        return _solve(A, b, X, tag, nonneg)
+    mu, Sinv, nu = inst_prior; ii = np.flatnonzero(tag == "inst"); u = 1.0
+    for _ in range(irls if np.isfinite(nu) else 1):
+        A2 = A.copy(); b2 = b.copy(); A2[np.ix_(ii, ii)] += u * Sinv; b2[ii] += u * (Sinv @ mu); th, m = _solve(A2, b2, X, tag, nonneg)
+        if np.isfinite(nu):
+            r = th[ii] - mu; u = (nu + len(ii)) / (nu + r @ Sinv @ r)
+    return th, m
+
+
+def fit_object(fid, z, f, w, nonneg=None, inst_prior=None, parts_list=(("phys",), ("phys", "inst"), ("phys", "sky"), ("phys", "inst", "sky")), hidden=None, sky_scale=1.0):
     """fits for each part set; returns dict parts -> (theta, tag, model, per-tag models). hidden: bool mask excluded from the fit."""
     wf = w * (~hidden if hidden is not None else 1.0); out = {}
     for parts in parts_list:
-        X, prec, tag = fid.columns(z, parts, sky_scale); th, m = wls(X, prec, tag, f, wf, nonneg=nonneg)
+        X, prec, tag = fid.columns(z, parts, sky_scale); th, m = wls(X, prec, tag, f, wf, nonneg=nonneg, inst_prior=inst_prior if "inst" in parts else None)
         out[parts] = dict(theta=th, tag=tag, model=m, comp={t: th[tag == t] @ X[tag == t] for t in set(tag)}, X=X)
     return out
 

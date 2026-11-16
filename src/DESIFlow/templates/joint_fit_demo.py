@@ -47,12 +47,13 @@ class Fiducial:
         import torch
         self.T = torch.load(legacy_pt, map_location="cpu", weights_only=False)["templates"].numpy().astype(np.float64); self.N = self.T.shape[1]
         self.Rm = np.load(os.path.join(phys_dir, "R_mean.npy")).astype(np.float64) if use_R else None
-        W = camera_weights(); cols, kinds = [], []
+        W = camera_weights(); cols, kinds, colsf = [], [], []
         for c in "brz":
             K = K_CAM[c]; t = np.load(os.path.join(root, "long", "seed0", c, f"K{K:03d}.npz"))["templates_flux"].astype(np.float64); a0, a1 = CAMS[c]
             for k in range(K):
                 v = np.zeros(L); v[a0:a1] = t[k]; cols.append(v * W[c]); kinds.append(f"inst_{c}")
-        self.inst = np.array(cols); self.inst_kind = np.array(kinds)
+                vf = np.zeros(L); vf[a0:a1] = t[k][::-1]; colsf.append(vf * W[c])            # control: the same template reversed in wavelength within its camera
+        self.inst = np.array(cols); self.inst_kind = np.array(kinds); self.inst_flip = np.array(colsf)
         self.sky = np.load(os.path.join(root, "long", "seed0", "sky", f"K{K_SKY:03d}.npz"))["templates_flux"].astype(np.float64)
         self.prior_inst, self.prior_sky = self._priors(root)
         self.t_priors, self.t_center, self.t_scale = {}, {}, {}                    # empirical Student-t prior of the instrument coefficients per observing program (instrument_prior.py --t)

@@ -12,10 +12,10 @@ Contents of artifacts/fiducial_templates_v1.npz
                                              including the cross-camera blocks), degrees of freedom; fitted by EM to the coefficients of 30,000 SKY rows, estimation noise removed
   skyprior_{dark,bright,backup,all}_{S,nu}   Student-t prior (zero location) of the 64 sky coefficients per program, CALIBRATED 2026-11-17: scatter matrix eps_program^2 x the covariance of the VAC
                                              coefficients of that program (eps 0.0056 dark, 0.0032 bright, 0.032 backup, fitted on the SKY-row residuals), nu = 10; 'all' = the bright prior (fallback)
-  skyprior_inflation, skyprior_lineness (64,) the scale of template k is multiplied by inflation ** lineness_k at load time (lineness = fraction of the template's energy in the sky-line pixels, top 10% of the
+  skyprior_inflation (1.0 = the pure SKY-row calibration, the shipped default), skyprior_lineness (64,) the scale of template k can be multiplied by inflation ** lineness_k at load time (lineness = fraction of the template's energy in the sky-line pixels, top 10% of the
                                              sky-template energy): the SKY-row calibration describes sky-fibre residuals that are in-sample for the sky model and is far too tight for the LINE residuals of target
                                              fibres (SPS hold-out test, docs/sky_instrument_templates.md), while a uniform inflation lets the broad templates compete with the physical flux; the stored scatter matrices are the
-                                             calibrated ones, inflation = 1 gives the pure SKY-row calibration
+                                             calibrated ones; the default is inflation = 1 (pure calibration), inflation = 30 is the SPS-tuned option (sky_prior(program, inflation=30))
   sky_prior_sigma (64,)                      the earlier assumed Gaussian sigma (1% of the VAC std), kept for reference
   provenance                                 JSON string
 Shape is what is frozen; the scale of the instrument response can be changed after the fact through the prior (`rescale_prior`).
@@ -41,7 +41,7 @@ def build(root, phys, legacy, out=PATH):
     zs = np.load(os.path.join(root, "sky_prior.npz"))
     for q in ("dark", "bright", "backup"):
         d[f"skyprior_{q}_S"] = float(zs[f"eC_{q}"]) ** 2 * zs[f"Svac_{q}"]; d[f"skyprior_{q}_nu"] = np.array(float(zs[f"nuC_{q}"]))
-    d["skyprior_all_S"] = d["skyprior_bright_S"]; d["skyprior_all_nu"] = d["skyprior_bright_nu"]; d["skyprior_inflation"] = np.array(30.0)
+    d["skyprior_all_S"] = d["skyprior_bright_S"]; d["skyprior_all_nu"] = d["skyprior_bright_nu"]; d["skyprior_inflation"] = np.array(1.0)
     e = np.sum(fid.sky ** 2, 0); d["skyprior_lineness"] = (fid.sky[:, e > np.percentile(e, 90)] ** 2).sum(1) / (fid.sky ** 2).sum(1)
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     np.savez_compressed(out, wavelength_A=jd.LAM, inst_templates_flux=fid.inst.astype(np.float32), inst_camera=fid.inst_kind, camera_weights=np.array([W[c] for c in "brz"], np.float32),

@@ -58,21 +58,25 @@ class SPS:
         cols = np.array(cols); cols[:, (lam < 3600) | (lam > 9824)] = 0.0; return cols
 
 
-def solve(Ppos, Qfree, w, f, prior=None, sky_sig=None, irls=4):
+def solve(Ppos, Qfree, w, f, prior=None, sky_sig=None, irls=4, sky_prior=None):
     """non-negative amplitudes of Ppos and free (signed) coefficients of Qfree = [instrument | sky] with the priors; NNLS on the variable-split augmented system.
-    prior = (mu, Sinv, nu) for the instrument block (first len(mu) columns of Qfree), sky_sig the Gaussian sigma of the sky block."""
+    prior = (mu, Sinv, nu) for the instrument block (first len(mu) columns of Qfree); the sky block has either a Student-t prior sky_prior = (mu, Sinv, nu) or a diagonal Gaussian of sigma sky_sig."""
     sw = np.sqrt(w); npos = len(Ppos)
-    A0 = [Ppos * sw[None]]; 
     if Qfree is None or len(Qfree) == 0:
-        D = (np.vstack(A0)).T; sc = np.linalg.norm(D, axis=0); sc[sc == 0] = 1.0; x, _ = nnls(D / sc, sw * f, maxiter=10000); x = x / sc; return x, None
-    nq = len(Qfree); ni = len(prior[0]); u = 1.0; Qw = Qfree * sw[None]
+        D = Ppos.T * sw[:, None]; sc = np.linalg.norm(D, axis=0); sc[sc == 0] = 1.0; x, _ = nnls(D / sc, sw * f, maxiter=10000); x = x / sc; return x, None
+    nq = len(Qfree); ni = len(prior[0]); ns = nq - ni; u = 1.0; us = 1.0; Qw = Qfree * sw[None]
     for it in range(irls):
-        Lc = np.linalg.cholesky(u * prior[1] + 1e-12 * np.eye(ni)).T if np.isfinite(prior[2]) or it == 0 else Lc                  # Cholesky factor of the current prior precision
-        pri_rows = np.zeros((nq, npos + 2 * nq)); pri_rows[:ni, npos:npos + ni] = Lc; pri_rows[:ni, npos + nq:npos + nq + ni] = -Lc; k = np.arange(ni, nq)
-        pri_rows[k, npos + k] = 1.0 / sky_sig; pri_rows[k, npos + nq + k] = -1.0 / sky_sig
-        top = np.hstack([Ppos.T * sw[:, None], Qw.T, -Qw.T]); D = np.vstack([top, pri_rows]); rhs = np.concatenate([sw * f, Lc @ prior[0], np.zeros(nq - ni)])
+        Lc = np.linalg.cholesky(u * prior[1] + 1e-12 * np.eye(ni)).T
+        pri_rows = np.zeros((nq, npos + 2 * nq)); pri_rows[:ni, npos:npos + ni] = Lc; pri_rows[:ni, npos + nq:npos + nq + ni] = -Lc
+        if sky_prior is not None:
+            Ls = np.linalg.cholesky(us * sky_prior[1] + 1e-12 * np.eye(ns)).T; pri_rows[ni:, npos + ni:npos + nq] = Ls; pri_rows[ni:, npos + nq + ni:npos + 2 * nq] = -Ls
+        else:
+            k = np.arange(ni, nq); pri_rows[k, npos + k] = 1.0 / sky_sig; pri_rows[k, npos + nq + k] = -1.0 / sky_sig
+        top = np.hstack([Ppos.T * sw[:, None], Qw.T, -Qw.T]); D = np.vstack([top, pri_rows]); rhs = np.concatenate([sw * f, Lc @ prior[0], np.zeros(ns)])
         sc = np.linalg.norm(D, axis=0); sc[sc == 0] = 1.0; x, _ = nnls(D / sc, rhs, maxiter=20000); x = x / sc; th = x[npos:npos + nq] - x[npos + nq:]
         r = th[:ni] - prior[0]; m2 = r @ prior[1] @ r; u = (prior[2] + ni) / (prior[2] + m2) if np.isfinite(prior[2]) else 1.0
+        if sky_prior is not None and np.isfinite(sky_prior[2]):
+            rs = th[ni:]; us = (sky_prior[2] + ns) / (sky_prior[2] + rs @ sky_prior[1] @ rs)
     return x[:npos], th
 
 
@@ -80,6 +84,9 @@ def one(args):
     i = args; fid, sps = _W["fid"], _W["sps"]; F, Wt, Z, PR = _W["F"], _W["W"], _W["Z"], _W["PR"]
     f = np.asarray(F[i], np.float64); w = np.asarray(Wt[i], np.float64); z = float(Z[i]); prog = PR[i]; ip = fid.t_priors.get(prog, fid.t_priors["all"])
     from DESIFlow.data.target_nuisance_test import span_mask
+    skp = fid.t_sky_priors.get(prog, fid.t_sky_priors.get("all")) if (jd.USE_SKY_T and fid.t_sky_priors) else None
+    if skp is not None and _W.get("sky_scale", 1.0) != 1.0:
+        skp = (skp[0], skp[1] / _W["sky_scale"] ** 2, skp[2])                                                  # scatter x scale^2
     Qreal = np.vstack([fid.inst, fid.sky]); Qflip = np.vstack([fid.inst_flip, fid.sky[:, ::-1]]); sig_sky = np.maximum(fid.prior_sky, 1e-12)
     S = {s: sps.stellar(z, s) for s in SIGV}; Ln = sps.lines(z)
 
@@ -103,7 +110,7 @@ def one(args):
                 if variant == 0:
                     x, _ = solve(P, None, wt, f); m = x @ P; q = None
                 else:
-                    Qv = qmat(variant); x, th = solve(P, Qv, wt, f, prior=ip, sky_sig=sig_sky); m = x @ P + th @ Qv; q = th
+                    Qv = qmat(variant); x, th = solve(P, Qv, wt, f, prior=ip, sky_sig=sig_sky, sky_prior=skp); m = x @ P + th @ Qv; q = th
                 c = float((wt * (f - m) ** 2).sum())
                 if best is None or c < best[0]:
                     best = (c, (s, av), m, q, x @ P)
@@ -168,21 +175,24 @@ def main(root, phys, cache, legacy, figdir, cachedir, n=200, workers=12):
         r = res[e]; a = ax[1, 1 + k]; g = r["w"] > 0; a.plot(jd.LAM[g], r["f"][g], color="0.8", lw=0.3); a.plot(jd.LAM, jd.nw(r["f"], r["w"], 6.0), "k", lw=0.9, label="data (NW smooth)"); a.plot(jd.LAM, jd.nw(r["model0"], np.ones(jd.L), 1.0), "tab:blue", lw=0.9, label="SPS only")
         a.plot(jd.LAM, jd.nw(r["model1"], np.ones(jd.L), 1.0), "tab:red", lw=0.9, label="SPS + instrument + sky"); a.plot(jd.LAM, r["inst_sps"], "tab:orange", lw=0.7, label="instrument component (SPS fit)"); a.plot(jd.LAM, r["inst_leg"], "tab:green", lw=0.7, ls="--", label="instrument component (legacy fit)")
         a.set_ylim(-1, np.nanpercentile(jd.nw(r["f"], r["w"], 6.0), 99) * 1.4); a.legend(fontsize=6); a.set_xlabel("observed wavelength [Angstrom]"); a.set_ylabel("flux [1e-17 erg/s/cm2/A]"); a.set_title(f"z = {r['z']:.3f}, S/N {r['snr']:.1f}", fontsize=9)
-    fig.tight_layout(); os.makedirs(figdir, exist_ok=True); fig.savefig(os.path.join(figdir, "sps_verification.png"), dpi=110); plt.close(fig)
+    fig.tight_layout(); os.makedirs(figdir, exist_ok=True); fig.savefig(os.path.join(figdir, "sps_verification.png" if _W.get("sky_scale", 1.0) == 1.0 else f"sps_verification_skyscale{_W['sky_scale']:g}.png"), dpi=110); plt.close(fig)
     fig, ax = plt.subplots(1, 3, figsize=(18, 5.5)); cols = ["tab:red", "tab:gray", "tab:orange", "tab:olive", "tab:purple", "tab:pink"]
     for j, (k, nm) in enumerate((("hid_all7", "all hidden pixels"), ("hid_line7", "hidden sky-line pixels"), ("hid_cont7", "hidden continuum pixels"))):
         d = [H[k][:, v] - H[k][:, 0] for v in range(1, 7)]; ax[j].bar(range(6), [x.mean() for x in d], yerr=[x.std() / np.sqrt(len(x)) for x in d], color=cols); ax[j].set_xticks(range(6)); ax[j].set_xticklabels(["inst+sky\nreal", "inst+sky\nreversed", "inst\nreal", "inst\nreversed", "sky\nreal", "sky\nreversed"], fontsize=8); ax[j].axhline(0, color="k", lw=0.8)
         ax[j].set_ylabel("paired change of the hidden-pixel chi2 per pixel vs SPS only (negative = better)"); ax[j].set_title(nm, fontsize=9)
-    fig.tight_layout(); fig.savefig(os.path.join(figdir, "sps_verification_decomposition.png"), dpi=110); plt.close(fig); np.savez(os.path.join(cachedir, "sps_verification_decomposition.npz"), **H)
-    np.savez(os.path.join(cachedir, "sps_verification.npz"), chi=chi, hid=hid, snr=snr, z=np.array([r["z"] for r in res]), corr_same=cors, corr_null=null, amp_sps_leg=amp, grid=np.array([r["grid"] for r in res]))
-    json.dump([{k: v for k, v in r.items() if k in ("i", "z", "snr", "prog", "chi0", "chi1", "chi2", "hid", "grid")} for r in res], open(os.path.join(root, "sps_verification.json"), "w"))
+    fig.tight_layout(); fig.savefig(os.path.join(figdir, "sps_verification_decomposition.png" if _W.get("sky_scale", 1.0) == 1.0 else f"sps_verification_decomposition_skyscale{_W['sky_scale']:g}.png"), dpi=110); plt.close(fig); np.savez(os.path.join(cachedir, "sps_verification_decomposition.npz" if _W.get("sky_scale", 1.0) == 1.0 else f"sps_verification_decomposition_skyscale{_W['sky_scale']:g}.npz"), **H)
+    np.savez(os.path.join(cachedir, "sps_verification.npz" if _W.get("sky_scale", 1.0) == 1.0 else f"sps_verification_skyscale{_W['sky_scale']:g}.npz"), chi=chi, hid=hid, snr=snr, z=np.array([r["z"] for r in res]), corr_same=cors, corr_null=null, amp_sps_leg=amp, grid=np.array([r["grid"] for r in res]))
+    json.dump([{k: v for k, v in r.items() if k in ("i", "z", "snr", "prog", "chi0", "chi1", "chi2", "hid", "grid")} for r in res], open(os.path.join(root, "sps_verification.json" if _W.get("sky_scale", 1.0) == 1.0 else f"sps_verification_skyscale{_W['sky_scale']:g}.json"), "w"))
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--root", required=True); ap.add_argument("--phys", required=True); ap.add_argument("--cache", required=True); ap.add_argument("--legacy", required=True); ap.add_argument("--fig", required=True); ap.add_argument("--figcache", required=True)
-    ap.add_argument("--n", type=int, default=200); ap.add_argument("--workers", type=int, default=12); ap.add_argument("--test", action="store_true")
+    ap.add_argument("--n", type=int, default=200); ap.add_argument("--workers", type=int, default=12); ap.add_argument("--test", action="store_true"); ap.add_argument("--old-sky-prior", action="store_true"); ap.add_argument("--sky-scale", type=float, default=1.0)
     a = ap.parse_args()
+    if a.old_sky_prior:
+        jd.USE_SKY_T = False
+    _W["sky_scale"] = a.sky_scale
     if a.test:
         import time
         init(a.root, a.phys, a.cache, a.legacy); idx = [int(i) for i in _W["pop"]][:3]

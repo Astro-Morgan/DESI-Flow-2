@@ -56,6 +56,15 @@ class Fiducial:
         self.inst = np.array(cols); self.inst_kind = np.array(kinds); self.inst_flip = np.array(colsf)
         self.sky = np.load(os.path.join(root, "long", "seed0", "sky", f"K{K_SKY:03d}.npz"))["templates_flux"].astype(np.float64)
         self.prior_inst, self.prior_sky = self._priors(root)
+        self.t_sky_priors = {}
+        fp = os.path.join(os.path.dirname(__file__), "..", "..", "..", "artifacts", "fiducial_templates_v1.npz")
+        if os.path.exists(fp):
+            zf = np.load(fp)
+            for q in ("dark", "bright", "backup", "all"):
+                if f"skyprior_{q}_S" in zf.files:
+                    infl = SKY_INFLATION if SKY_INFLATION is not None else (float(zf["skyprior_inflation"]) if "skyprior_inflation" in zf.files else 1.0)
+                    D = infl ** zf["skyprior_lineness"] if "skyprior_lineness" in zf.files else np.full(len(self.sky), infl)
+                    self.t_sky_priors[q] = (np.zeros(len(self.sky)), np.linalg.inv(zf[f"skyprior_{q}_S"] * np.outer(D, D)), float(zf[f"skyprior_{q}_nu"]))
         self.t_priors, self.t_center, self.t_scale = {}, {}, {}                    # empirical Student-t prior of the instrument coefficients per observing program (instrument_prior.py --t)
         tp = os.path.join(root, "instrument_prior_t.npz")
         if os.path.exists(tp):
@@ -108,6 +117,8 @@ class Fiducial:
         return np.vstack(X), np.concatenate(prec), np.array(tag)
 
 
+SKY_INFLATION = None   # None: the factor stored in the fiducial file (30); 1.0 = the pure SKY-row calibration
+USE_SKY_T = True       # sky-coefficient prior: the calibrated Student-t per program of the fiducial file (False: the 1% diagonal Gaussian assumed before 2026-11-17)
 USE_T = True           # instrument-coefficient prior: the empirical Student-t per observing program (False: the old zero-mean diagonal Gaussian)
 NONNEG = True          # standing rule (user, 2026-11-12): the cumulative physical model must be >= 0 at every pixel
 
@@ -125,34 +136,41 @@ def _solve(A, b, X, tag, nonneg):
     th = np.linalg.solve(A, b + Gt @ lam); return th, th @ X
 
 
-def wls(X, prec, tag, f, w, ridge_phys=1e-6, nonneg=None, inst_prior=None, irls=10):
+def wls(X, prec, tag, f, w, ridge_phys=1e-6, nonneg=None, inst_prior=None, sky_prior=None, irls=10):
     """regularised weighted least squares; with nonneg the cumulative physical model sum_k c_k phi_k is constrained to be >= 0 at every pixel.
     The inequality-constrained QP  min 1/2 th'A th - b'th  s.t.  G th >= 0  is solved through its dual, a non-negative least squares problem:
     th = A^-1 (b + G' lam), lam = argmin_{lam >= 0} |A^-1/2 (b + G' lam)|^2  (scipy nnls).
-    inst_prior = (mu, Sinv, nu): a multivariate Student-t prior on the instrument coefficients (location mu, inverse scatter Sinv, degrees of freedom nu; nu = inf is a Gaussian),
+    inst_prior / sky_prior = (mu, Sinv, nu): a multivariate Student-t prior on the instrument / sky coefficients (location mu, inverse scatter Sinv, degrees of freedom nu; nu = inf is a Gaussian),
     fitted by iteratively reweighted least squares (scale mixture: the prior precision is u Sinv with u = (nu + d) / (nu + Mahalanobis^2) updated from the current coefficients)."""
     nonneg = NONNEG if nonneg is None else nonneg
     Xw = X * w[None]; A = Xw @ X.T; d = np.diag(A).copy(); pp = prec.copy(); pp[tag == "phys"] = ridge_phys * d[tag == "phys"]
-    if inst_prior is not None:
-        pp[tag == "inst"] = 0.0
+    blocks = [(np.flatnonzero(tag == nm), pr) for nm, pr in (("inst", inst_prior), ("sky", sky_prior)) if pr is not None]
+    for ii, _ in blocks:
+        pp[ii] = 0.0
     A[np.diag_indices_from(A)] += pp; b = Xw @ f
-    if inst_prior is None:
+    if not blocks:
         return _solve(A, b, X, tag, nonneg)
-    mu, Sinv, nu = inst_prior; ii = np.flatnonzero(tag == "inst"); u = 1.0
-    for _ in range(irls if np.isfinite(nu) else 1):
-        A2 = A.copy(); b2 = b.copy(); A2[np.ix_(ii, ii)] += u * Sinv; b2[ii] += u * (Sinv @ mu); th, m = _solve(A2, b2, X, tag, nonneg)
-        if np.isfinite(nu):
-            r = th[ii] - mu; u = (nu + len(ii)) / (nu + r @ Sinv @ r)
+    us = [1.0] * len(blocks); n_it = irls if any(np.isfinite(pr[2]) for _, pr in blocks) else 1
+    for _ in range(n_it):
+        A2 = A.copy(); b2 = b.copy()
+        for (ii, (mu, Sinv, nu)), u in zip(blocks, us):
+            A2[np.ix_(ii, ii)] += u * Sinv; b2[ii] += u * (Sinv @ mu)
+        th, m = _solve(A2, b2, X, tag, nonneg)
+        for k, (ii, (mu, Sinv, nu)) in enumerate(blocks):
+            if np.isfinite(nu):
+                r = th[ii] - mu; us[k] = (nu + len(ii)) / (nu + r @ Sinv @ r)
     return th, m
 
 
-def fit_object(fid, z, f, w, nonneg=None, inst_prior=None, prog=None, parts_list=(("phys",), ("phys", "inst"), ("phys", "sky"), ("phys", "inst", "sky")), hidden=None, sky_scale=1.0):
+def fit_object(fid, z, f, w, nonneg=None, inst_prior=None, prog=None, sky_prior=None, parts_list=(("phys",), ("phys", "inst"), ("phys", "sky"), ("phys", "inst", "sky")), hidden=None, sky_scale=1.0):
     """fits for each part set; returns dict parts -> (theta, tag, model, per-tag models). hidden: bool mask excluded from the fit."""
     if inst_prior is None and prog is not None and USE_T and fid.t_priors:
         inst_prior = fid.t_priors.get(prog, fid.t_priors["all"])
+    if sky_prior is None and prog is not None and USE_SKY_T and fid.t_sky_priors:
+        sky_prior = fid.t_sky_priors.get(prog, fid.t_sky_priors["all"])
     wf = w * (~hidden if hidden is not None else 1.0); out = {}
     for parts in parts_list:
-        X, prec, tag = fid.columns(z, parts, sky_scale); th, m = wls(X, prec, tag, f, wf, nonneg=nonneg, inst_prior=inst_prior if "inst" in parts else None)
+        X, prec, tag = fid.columns(z, parts, sky_scale); th, m = wls(X, prec, tag, f, wf, nonneg=nonneg, inst_prior=inst_prior if "inst" in parts else None, sky_prior=sky_prior if "sky" in parts else None)
         out[parts] = dict(theta=th, tag=tag, model=m, comp={t: th[tag == t] @ X[tag == t] for t in set(tag)}, X=X)
     return out
 

@@ -327,3 +327,9 @@ Cross-model check: the instrument component of V1 (SPS) against that of the lega
 the shape of the instrument response is supported by two independent physical models, its absolute level (the instrument/physical partition) is not.
 Caveats: the SPS model is crude (5 ages, one metallicity), so the improvements also contain SPS mismatch absorbed by the real templates (the reversed control removes generic flexibility but not mismatch aligned with real spectral structure); faint galaxies only; the prior comes from SKY rows; repeat observations of the same targets and a second SPS family (other metallicities) would be the next independent checks.
 Figures: sps_verification, sps_verification_decomposition (+ .npz).
+
+## Fiducial set frozen (2026-11-17)
+
+Decision: the instrument templates (per camera, b K=5, r K=6, z K=12) and the sky templates (K=64) under the per-program Student-t prior are the fiducial set; shape is frozen, scale is adjusted after the fact through the coefficient priors (`Fiducial.rescale_prior`). Stored in `artifacts/fiducial_templates_v1.npz` with the loader `DESIFlow.templates.fiducial.load_fiducial()`.
+The prior scatter is a full 23 x 23 matrix fitted to the joint coefficients on the merged grid, so cross-camera covariance is included (corr b1-r1 +0.5, r1-z1 +0.64 dark / +0.76 bright / +0.84 backup, b1-z1 +0.35-0.54; mean |corr| 0.10-0.15 within a camera, 0.05-0.09 across cameras). Held-out log predictive density per SKY row, full / block-diagonal / diagonal scatter:
+dark -51.24 / -51.59 / -52.18; bright -70.13 / -70.65 / -71.14; backup -94.78 / -95.77 / -96.17, i.e. the cross-camera terms are worth 0.35 / 0.52 / 0.98 nats per row (significant but modest). The sky prior (1% of the VAC coefficient scatter) is an assumption, not a calibrated distribution.
